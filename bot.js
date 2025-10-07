@@ -30,13 +30,13 @@ function saveMemory() {
     longTerm: Object.fromEntries(longTermMemory),
     emotionalEvents: Object.fromEntries(emotionalEvents)
   };
-  fs.writeFileSync('memory.json', JSON.stringify(memoryData, null, 2));
+  fs.writeFileSync('memory/memory.json', JSON.stringify(memoryData, null, 2));
 }
 
 function loadMemory() {
-  if (fs.existsSync('memory.json')) {
+  if (fs.existsSync('memory/memory.json')) {
     try {
-      const data = JSON.parse(fs.readFileSync('memory.json'));
+      const data = JSON.parse(fs.readFileSync('memory/memory.json'));
       
       // Load short-term memory
       if (data.shortTerm) {
