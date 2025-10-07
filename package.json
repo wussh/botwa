@@ -11,8 +11,8 @@
   "description": "",
   "dependencies": {
     "@whiskeysockets/baileys": "^6.17.16",
-    "axios": "^1.9.0",
-    "baileys": "^6.7.16",
+    "axios": "^1.12.2",
+    "baileys": "^6.7.20",
     "qrcode-terminal": "^0.12.0"
   }
 }
