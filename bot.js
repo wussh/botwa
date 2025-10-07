@@ -5,7 +5,7 @@ const fs = require('fs');
 
 // Configuration - Set the WhatsApp numbers of people you want the bot to respond to
 // Format: include country code without +, example: "6281234567890" for Indonesia
-const ALLOWED_CONTACTS = ["6281261480997", "6283108490895","6285174237321","601162620212"]; // Add more numbers as needed
+const ALLOWED_CONTACTS = ["6281261480997", "6283108490895","6285174237321","601162620212","6285298222159","6287832550290"]; // Add more numbers as needed
 
 // Function to normalize phone number for comparison
 function normalizePhoneNumber(phoneNumber) {
