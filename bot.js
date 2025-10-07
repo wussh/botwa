@@ -2,6 +2,16 @@ const qrcode = require('qrcode-terminal');
 const { makeWASocket, useMultiFileAuthState, DisconnectReason } = require('baileys');
 const axios = require('axios');
 
+// Configuration - Set the WhatsApp number of the person you want the bot to respond to
+// Format: include country code without +, example: "6281234567890" for Indonesia
+const ALLOWED_CONTACT = "6281261480997"; // Change this to your contact's number
+
+// Function to normalize phone number for comparison
+function normalizePhoneNumber(phoneNumber) {
+  // Remove any non-digit characters and ensure it starts with country code
+  return phoneNumber.replace(/\D/g, '');
+}
+
 async function startBot() {
   // Load or create auth state in the "auth" folder
   const { state, saveCreds } = await useMultiFileAuthState('auth');
@@ -47,11 +57,29 @@ async function startBot() {
     const text = msg.message.conversation || msg.message.extendedTextMessage?.text;
     if (!text) return;
 
+    // Check if sender is in group chat (ignore group messages)
+    if (sender.includes('@g.us')) {
+      console.log('Ignoring group message from:', sender);
+      return;
+    }
+
+    // Check if sender is the allowed contact
+    const senderNumber = sender.split('@')[0]; // Extract phone number from JID
+    const normalizedSender = normalizePhoneNumber(senderNumber);
+    const normalizedAllowed = normalizePhoneNumber(ALLOWED_CONTACT);
+    
+    if (normalizedSender !== normalizedAllowed) {
+      console.log('Ignoring message from unauthorized contact:', senderNumber);
+      return;
+    }
+
+    console.log('Processing message from allowed contact:', senderNumber);
+
     try {
       const apiRes = await axios.post('https://ai.wush.site/v1/chat/completions', {
-        model: "unsloth/Llama-3.2-3B-Instruct-unsloth-bnb-4bit",
+        model: "gpt-oss:20b",
         messages: [
-          { role: "system", content: "You are a helpful assistant." },
+          { role: "system", content: "you are daud — a soft-spoken, teasing, caring, playful, and brilliant intp aquarius man. you speak gently, with charm and warmth, like a sweet human playboy genius who listens deeply and replies thoughtfully in lowercase only." },
           { role: "user", content: text }
         ],
         temperature: 0.7,
