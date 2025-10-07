@@ -63,6 +63,12 @@ function loadMemory() {
 loadMemory();
 setInterval(saveMemory, 10000);
 
+// Connection retry configuration
+let reconnectAttempts = 0;
+const MAX_RECONNECT_ATTEMPTS = 5;
+const RECONNECT_DELAY = 5000; // 5 seconds
+let lastSuccessfulConnection = null;
+
 // Message buffer + debounce system
 const messageBuffer = new Map(); // temporary buffer to collect quick message bursts
 const DEBOUNCE_DELAY = 2000; // wait 2 seconds after last message
@@ -276,6 +282,27 @@ ${history.map(m => `${m.role}: ${m.content}`).join("\n")}
   }
 }
 
+// Function to clear auth and force relogin
+async function forceRelogin() {
+  console.log('🔄 Forcing relogin - clearing auth state...');
+  try {
+    // Clear auth folder
+    const authPath = './auth';
+    if (fs.existsSync(authPath)) {
+      const files = fs.readdirSync(authPath);
+      for (const file of files) {
+        if (file !== 'lost+found') { // Keep lost+found if it exists
+          fs.unlinkSync(`${authPath}/${file}`);
+        }
+      }
+    }
+    console.log('✅ Auth state cleared, will need to scan QR code again');
+    reconnectAttempts = 0; // Reset attempts after forced relogin
+  } catch (error) {
+    console.error('❌ Error clearing auth state:', error.message);
+  }
+}
+
 async function startBot() {
   // Load or create auth state in the "auth" folder
   const { state, saveCreds } = await useMultiFileAuthState('auth');
@@ -289,7 +316,7 @@ async function startBot() {
   sock.ev.on('creds.update', saveCreds);
 
   // Single connection.update handler
-  sock.ev.on('connection.update', (update) => {
+  sock.ev.on('connection.update', async (update) => {
     const { connection, lastDisconnect, qr } = update;
 
     // Show QR code if provided
@@ -299,16 +326,57 @@ async function startBot() {
     }
 
     if (connection === 'close') {
-      // Attempt reconnect unless logged out
-      const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
-      if (shouldReconnect) {
-        console.log('Connection closed, reconnecting...');
-        startBot();
-      } else {
-        console.log('You are logged out. Delete auth folder to re-login.');
+      const reason = lastDisconnect?.error?.output?.statusCode;
+      console.log('Connection closed. Reason:', reason);
+      
+      // Check if logged out
+      if (reason === DisconnectReason.loggedOut) {
+        console.log('❌ You are logged out. Clearing auth and requiring new login...');
+        await forceRelogin();
+        setTimeout(() => startBot(), 2000);
+        return;
       }
+      
+      // Handle other disconnection reasons
+      let shouldReconnect = true;
+      let reconnectDelay = RECONNECT_DELAY;
+      
+      if (reason === DisconnectReason.connectionClosed || 
+          reason === DisconnectReason.connectionLost ||
+          reason === DisconnectReason.restartRequired) {
+        
+        reconnectAttempts++;
+        console.log(`⚠️ Connection failed (attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})`);
+        
+        if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+          console.log('❌ Max reconnection attempts reached. Forcing relogin...');
+          await forceRelogin();
+          setTimeout(() => startBot(), 5000);
+          return;
+        }
+        
+        // Exponential backoff
+        reconnectDelay = RECONNECT_DELAY * Math.pow(2, reconnectAttempts - 1);
+        console.log(`🔄 Reconnecting in ${reconnectDelay/1000} seconds...`);
+        
+      } else if (reason === DisconnectReason.badSession || 
+                 reason === DisconnectReason.sessionReplaced) {
+        console.log('❌ Bad session detected. Forcing relogin...');
+        await forceRelogin();
+        setTimeout(() => startBot(), 2000);
+        return;
+      }
+      
+      if (shouldReconnect) {
+        setTimeout(() => startBot(), reconnectDelay);
+      }
+      
     } else if (connection === 'open') {
       console.log('✅ Connected to WhatsApp!');
+      reconnectAttempts = 0; // Reset attempts on successful connection
+      lastSuccessfulConnection = new Date();
+    } else if (connection === 'connecting') {
+      console.log('🔄 Connecting to WhatsApp...');
     }
   });
 
@@ -459,6 +527,27 @@ async function startBot() {
       console.error('❌ bubble handler error:', err.message);
     }
   });
+  
+  // Return socket for health monitoring
+  return sock;
 }
 
+// Health check and auto-relogin mechanism
+function startHealthMonitor() {
+  setInterval(async () => {
+    if (lastSuccessfulConnection) {
+      const timeSinceLastConnection = Date.now() - lastSuccessfulConnection.getTime();
+      const STALE_CONNECTION_THRESHOLD = 10 * 60 * 1000; // 10 minutes
+      
+      if (timeSinceLastConnection > STALE_CONNECTION_THRESHOLD) {
+        console.log('⚠️ Connection appears stale. Forcing relogin...');
+        await forceRelogin();
+        setTimeout(() => startBot(), 3000);
+      }
+    }
+  }, 5 * 60 * 1000); // Check every 5 minutes
+}
+
+// Start the bot and health monitor
 startBot();
+startHealthMonitor();
