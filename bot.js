@@ -3,14 +3,20 @@ const { makeWASocket, useMultiFileAuthState, DisconnectReason } = require('baile
 const axios = require('axios');
 const fs = require('fs');
 
-// Configuration - Set the WhatsApp number of the person you want the bot to respond to
+// Configuration - Set the WhatsApp numbers of people you want the bot to respond to
 // Format: include country code without +, example: "6281234567890" for Indonesia
-const ALLOWED_CONTACT = "6281261480997"; // Change this to your contact's number
+const ALLOWED_CONTACTS = ["6281261480997", "6283108490895","6285174237321","601162620212"]; // Add more numbers as needed
 
 // Function to normalize phone number for comparison
 function normalizePhoneNumber(phoneNumber) {
   // Remove any non-digit characters and ensure it starts with country code
   return phoneNumber.replace(/\D/g, '');
+}
+
+// Function to check if sender is allowed
+function isAllowedContact(senderNumber) {
+  const normalized = normalizePhoneNumber(senderNumber);
+  return ALLOWED_CONTACTS.some(contact => normalizePhoneNumber(contact) === normalized);
 }
 
 // Memory to keep context per user
@@ -323,9 +329,9 @@ async function startBot() {
 
       if (!text.trim()) return; // skip empty messages
 
-      // Only talk to the allowed number
+      // Only talk to the allowed numbers
       const senderNumber = sender.split('@')[0];
-      if (normalizePhoneNumber(senderNumber) !== normalizePhoneNumber(ALLOWED_CONTACT)) {
+      if (!isAllowedContact(senderNumber)) {
         console.log('Ignoring message from unauthorized contact:', senderNumber);
         return;
       }
