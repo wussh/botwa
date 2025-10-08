@@ -1466,9 +1466,10 @@ async function startBot() {
 
       // set a 2-second timer — wait until the user stops sending bubbles
       const timer = setTimeout(async () => {
-        const allMessages = messageBuffer.get(sender).join(' | ');
-        messageBuffer.delete(sender);
-        messageBuffer.delete(`${sender}_timer`);
+        try {
+          const allMessages = messageBuffer.get(sender).join(' | ');
+          messageBuffer.delete(sender);
+          messageBuffer.delete(`${sender}_timer`);
 
         logger.debug({ allMessages }, '🧩 Processing message burst');
 
@@ -1626,8 +1627,14 @@ Cognitive context: ${reasoningChain.slice(-2).map(r => r.step + ':' + r.result).
           }
         ];
 
+        // Try primary model with fallback logic
+        let reply = '';
+        let apiRes = null;
+        let attemptedModels = [selectedModel];
+        
+        // Try primary model first
         try {
-          const apiRes = await aiClient.post('', {
+          apiRes = await aiClient.post('', {
             model: selectedModel,
             messages,
             temperature: 0.85,
@@ -1637,27 +1644,61 @@ Cognitive context: ${reasoningChain.slice(-2).map(r => r.step + ':' + r.result).
             presence_penalty: 0.3
           });
 
-          let reply = (apiRes.data.choices?.[0]?.message?.content || '').trim().toLowerCase();
+          reply = (apiRes.data.choices?.[0]?.message?.content || '').trim().toLowerCase();
+        } catch (primaryError) {
+          logger.warn({ model: selectedModel, error: primaryError.message }, '⚠️ Primary model failed, trying fallback');
           
-          // Fallback for very short or empty responses
-          if (!reply || reply.length < 3) {
-            const fallbacks = {
-              english: ["hey, what's on your mind?", "i'm here, tell me more", "go on, i'm listening"],
-              indonesian: ["halo, ada apa nih?", "aku dengerin kok, lanjut aja", "hmm, cerita dong"],
-              mixed: ["hmm?", "tell me more", "lanjut dong"]
-            };
-            reply = fallbacks[userLang]?.[Math.floor(Math.random() * 3)] || "hmm?";
+          // Fallback to most reliable models in order
+          const fallbackModels = ['phi4-mini-reasoning:3.8b', 'phi3:3.8b', 'qwen2.5:7b', 'mistral:latest'];
+          
+          for (const fallbackModel of fallbackModels) {
+            if (attemptedModels.includes(fallbackModel)) continue; // Skip if already tried
+            
+            try {
+              logger.debug({ fallbackModel }, '🔄 Attempting fallback model');
+              apiRes = await aiClient.post('', {
+                model: fallbackModel,
+                messages,
+                temperature: 0.85,
+                max_tokens: 150,
+                top_p: 0.9,
+                frequency_penalty: 0.3,
+                presence_penalty: 0.3
+              });
+              
+              reply = (apiRes.data.choices?.[0]?.message?.content || '').trim().toLowerCase();
+              attemptedModels.push(fallbackModel);
+              logger.info({ fallbackModel }, '✅ Fallback model succeeded');
+              break; // Success, exit loop
+            } catch (fallbackError) {
+              attemptedModels.push(fallbackModel);
+              logger.warn({ fallbackModel, error: fallbackError.message }, '❌ Fallback model also failed');
+              continue; // Try next fallback
+            }
           }
-          
-          // Enhanced structured logging for AI response
-          const usage = apiRes.data.usage || {};
+        }
+        
+        // If all models failed, use hardcoded fallback
+        if (!reply || reply.length < 3) {
+          const fallbacks = {
+            english: ["hey, what's on your mind?", "i'm here, tell me more", "go on, i'm listening"],
+            indonesian: ["halo, ada apa nih?", "aku dengerin kok, lanjut aja", "hmm, cerita dong"],
+            mixed: ["hmm?", "tell me more", "lanjut dong"]
+          };
+          reply = fallbacks[userLang]?.[Math.floor(Math.random() * 3)] || "hmm?";
+          logger.warn({ attemptedModels }, '⚠️ All AI models failed, using hardcoded fallback');
+        }
+        
+        // Enhanced structured logging for AI response
+          const usage = apiRes?.data?.usage || {};
           logger.info({
             sender,
             intent: messageIntent,
             emotion,
             tone,
             language: userLang,
-            model: selectedModel,
+            model: attemptedModels[attemptedModels.length - 1], // Log which model actually worked
+            attemptedModels: attemptedModels.length > 1 ? attemptedModels : undefined,
             temporalContext: temporalContext.timeContext,
             relationshipType: personalityAdaptation.relationshipType,
             dominantTraits: personalityAdaptation.dominantTraits,
@@ -1671,80 +1712,77 @@ Cognitive context: ${reasoningChain.slice(-2).map(r => r.step + ':' + r.result).
             reasoning: reasoningChain.length
           }, '🧩 AI response generated');
 
-          // Smart fallback logic for empty or short AI responses
-          if (!reply || reply.length < 3) {
-            console.warn("⚠️ empty or short ai response:", JSON.stringify(apiRes.data, null, 2));
-
-            const userMsg = allMessages.trim().toLowerCase();
-            const userLang = languageMemory.get(sender) || detectLanguage(allMessages);
-
-            // ignore trivial / filler messages (no reply)
-            if (/^(ok|oke|ya+|iy+a+|hmm+|uh+|oh+|ah+|hehe+|haha+|hahaha|lol+|h+|huh|hmmm+|hmm ok)$/i.test(userMsg)) {
-              console.log("⏸️ skipping trivial bubble:", userMsg);
-              return;
-            }
-
-            // respond based on content tone and user's language preference
-            if (userLang === 'english') {
-              if (/tired|sleepy|sleep|exhausted/.test(userMsg)) {
-                reply = "you seem tired. maybe you should get some rest?";
-              } else if (/sad|upset|hurt|down/.test(userMsg)) {
-                reply = "hey, it's okay to feel that way. want to talk about it?";
-              } else if (/annoying|frustrated|angry/.test(userMsg)) {
-                reply = "i hear you. let's take it slow and figure this out together.";
-              } else if (/stop|shut up|quiet/.test(userMsg)) {
-                reply = "if you want me to be quiet for a while, just say 'stop for now'.";
-              } else {
-                reply = "hmm i'm listening, but could you tell me a bit more so i understand?";
-              }
-            } else {
-              // Indonesian responses (existing logic)
-              if (/ribet|susah|malas|capek|repot/.test(userMsg)) {
-                reply = "iya ya, kadang hal kecil pun bisa ribet banget. mau aku bantu pikirin?";
-              } else if (/ngantuk|tidur|bangun|lelah|tired/.test(userMsg)) {
-                reply = "kayaknya kamu butuh istirahat bentar deh. aku jagain suasananya tenang dulu ya.";
-              } else if (/sedih|nangis|kecewa|hurt|pusing/.test(userMsg)) {
-                reply = "hei, gapapa kok kalau lagi ngerasa gitu. mau cerita dikit ke aku?";
-              } else if (/ribut|marah|kesal|emosi/.test(userMsg)) {
-                reply = "aku dengerin ya. coba tenang dulu, nanti kita bahas pelan-pelan.";
-              } else if (/mangkok|alat|barang|nyari|hilang/.test(userMsg)) {
-                reply = "haha kok bisa sih susah nyari mangkok, emang pada ngumpet semua?";
-              } else if (/matiin|stop|diam|bisa dimatiin|shut up/.test(userMsg)) {
-                reply = "kalau kamu mau aku diam dulu, aku bisa kok. bilang aja 'stop dulu ya'.";
-              } else if (/tumoah|apaan|hah|gaje|apa ini/.test(userMsg)) {
-                reply = "wkwk kamu lucu deh, ngomong kayak gitu bikin aku senyum sendiri.";
-              } else {
-                reply = "hmm aku dengerin, tapi coba ceritain dikit biar aku ngerti maksudmu.";
-              }
-            }
+          // Smart fallback logic for empty or short AI responses (secondary fallback)
+        if (!reply || reply.length < 3) {
+          const userMsg = allMessages.trim().toLowerCase();
+          
+          // ignore trivial / filler messages (no reply)
+          if (/^(ok|oke|ya+|iy+a+|hmm+|uh+|oh+|ah+|hehe+|haha+|hahaha|lol+|h+|huh|hmmm+|hmm ok)$/i.test(userMsg)) {
+            logger.debug({ userMsg }, "⏸️ Skipping trivial bubble");
+            return;
           }
 
-          history.push({ role: 'user', content: prompt });
-          history.push({ role: 'assistant', content: reply });
-          chatMemory.set(sender, history);
+          // Context-aware fallbacks based on emotion and intent
+          if (userLang === 'english') {
+            if (/tired|sleepy|sleep|exhausted/.test(userMsg)) {
+              reply = "you seem tired. maybe you should get some rest?";
+            } else if (/sad|upset|hurt|down/.test(userMsg)) {
+              reply = "hey, it's okay to feel that way. want to talk about it?";
+            } else if (/annoying|frustrated|angry/.test(userMsg)) {
+              reply = "i hear you. let's take it slow and figure this out together.";
+            } else if (/stop|shut up|quiet/.test(userMsg)) {
+              reply = "if you want me to be quiet for a while, just say 'stop for now'.";
+            } else {
+              reply = "hmm i'm listening, but could you tell me a bit more so i understand?";
+            }
+          } else {
+            // Indonesian context-aware responses
+            if (/ribet|susah|malas|capek|repot/.test(userMsg)) {
+              reply = "iya ya, kadang hal kecil pun bisa ribet banget. mau aku bantu pikirin?";
+            } else if (/ngantuk|tidur|bangun|lelah|tired/.test(userMsg)) {
+              reply = "kayaknya kamu butuh istirahat bentar deh. aku jagain suasananya tenang dulu ya.";
+            } else if (/sedih|nangis|kecewa|hurt|pusing/.test(userMsg)) {
+              reply = "hei, gapapa kok kalau lagi ngerasa gitu. mau cerita dikit ke aku?";
+            } else if (/ribut|marah|kesal|emosi/.test(userMsg)) {
+              reply = "aku dengerin ya. coba tenang dulu, nanti kita bahas pelan-pelan.";
+            } else if (/mangkok|alat|barang|nyari|hilang/.test(userMsg)) {
+              reply = "haha kok bisa sih susah nyari mangkok, emang pada ngumpet semua?";
+            } else if (/matiin|stop|diam|bisa dimatiin|shut up/.test(userMsg)) {
+              reply = "kalau kamu mau aku diam dulu, aku bisa kok. bilang aja 'stop dulu ya'.";
+            } else if (/tumoah|apaan|hah|gaje|apa ini/.test(userMsg)) {
+              reply = "wkwk kamu lucu deh, ngomong kayak gitu bikin aku senyum sendiri.";
+            } else {
+              reply = "hmm aku dengerin, tapi coba ceritain dikit biar aku ngerti maksudmu.";
+            }
+          }
+        }
 
-          // Natural behavior simulation - calculate dynamic reply delay
-          const replyDelay = calculateReplyDelay(reply, emotion, messageIntent);
-          logger.debug({ replyDelay, emotion, intent: messageIntent }, '⏰ Natural delay calculated');
-          
-          // Send response with natural delay using queue system
-          enqueueReply(sender, async () => {
-            await sock.sendPresenceUpdate('composing', sender);
-            setTimeout(async () => {
-              await sock.sendPresenceUpdate('paused', sender);
-              await sock.sendMessage(sender, { text: reply });
-              
-              // Self-reflection after response (meta-cognitive layer)
-              setTimeout(() => {
-                selfReflect(sender, allMessages, reply, emotion, messageIntent);
-              }, 1000);
-              
-              await summarizeHistory(sender);
-            }, replyDelay);
-          });
+        history.push({ role: 'user', content: prompt });
+        history.push({ role: 'assistant', content: reply });
+        chatMemory.set(sender, history);
 
+        // Natural behavior simulation - calculate dynamic reply delay
+        const replyDelay = calculateReplyDelay(reply, emotion, messageIntent);
+        logger.debug({ replyDelay, emotion, intent: messageIntent }, '⏰ Natural delay calculated');
+        
+        // Send response with natural delay using queue system
+        enqueueReply(sender, async () => {
+          await sock.sendPresenceUpdate('composing', sender);
+          setTimeout(async () => {
+            await sock.sendPresenceUpdate('paused', sender);
+            await sock.sendMessage(sender, { text: reply });
+            
+            // Self-reflection after response (meta-cognitive layer)
+            setTimeout(() => {
+              selfReflect(sender, allMessages, reply, emotion, messageIntent);
+            }, 1000);
+            
+            await summarizeHistory(sender);
+          }, replyDelay);
+        });
+        
         } catch (err) {
-          console.error('❌ api or handler error:', err.message);
+          logger.error({ error: err.message, stack: err.stack }, '❌ Message processing error');
         }
       }, CONFIG.DEBOUNCE_DELAY); // wait 2s after last message before replying
 
