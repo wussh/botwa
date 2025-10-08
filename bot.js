@@ -1,11 +1,15 @@
+console.log("🔍 Bot script is being loaded...");
 const qrcode = require('qrcode-terminal');
 const { makeWASocket, useMultiFileAuthState, DisconnectReason } = require('baileys');
 const axios = require('axios');
 const fs = require('fs');
 const pino = require('pino');
+console.log("🔍 Loading config...");
 const CONFIG = require('./config');
+console.log("🔍 Config loaded successfully!");
 
 // Setup structured logging
+console.log("🔍 Setting up logger...");
 const logger = pino({
   level: CONFIG.LOG_LEVEL,
   transport: {
@@ -17,23 +21,39 @@ const logger = pino({
     }
   }
 });
+console.log("🔍 Logger setup complete!");
+
+// Validate required configuration
+console.log("🔍 Validating configuration...");
+function requireConfig(key, type = 'string') {
+  const v = CONFIG[key];
+  if (v == null || typeof v !== type || (type === 'string' && v.trim() === '')) {
+    throw new Error(`Invalid CONFIG.${key} (${v}). Please set it in config.`);
+  }
+}
+['AI_API_URL','AI_EMBEDDING_URL','AUTH_FOLDER','MEMORY_FILE'].forEach(k => requireConfig(k));
+console.log("🔍 Configuration validated!");
 
 // Configuration - Set the WhatsApp numbers of people you want the bot to respond to
 // Format: include country code without +, example: "6281234567890" for Indonesia
-const ALLOWED_CONTACTS = ["6281261480997", "6283108490895","6285174237321","601162620212","6285298222159","6287832550290"]; // Add more numbers as needed
+console.log("🔍 Setting up contacts...");
+const ALLOWED_CONTACTS = Array.isArray(CONFIG.ALLOWED_CONTACTS) && CONFIG.ALLOWED_CONTACTS.length
+  ? CONFIG.ALLOWED_CONTACTS
+  : ["6281261480997", "6283108490895","6285174237321","601162620212","6285298222159","6287832550290"];
+console.log("🔍 Contacts setup complete!");
 
 // Function to normalize phone number for comparison
 function normalizePhoneNumber(phoneNumber) {
-  // Remove any non-digit characters and ensure it starts with country code
-  return phoneNumber.replace(/\D/g, '');
+  return String(phoneNumber || '').replace(/\D/g, '');
 }
 
 // Function to check if sender is allowed
 function isAllowedContact(senderNumber) {
   const normalized = normalizePhoneNumber(senderNumber);
-  return CONFIG.ALLOWED_CONTACTS.some(contact => normalizePhoneNumber(contact) === normalized);
+  return ALLOWED_CONTACTS.some(c => normalizePhoneNumber(c) === normalized);
 }
 
+console.log("🔍 Setting up memory maps...");
 // Memory to keep context per user
 const chatMemory = new Map(); // short-term: last N messages
 const longTermMemory = new Map(); // long-term: emotional/factual summaries
@@ -41,10 +61,40 @@ const emotionalEvents = new Map(); // emotional milestones worth remembering
 const toneMemory = new Map(); // stores tone style per user
 const languageMemory = new Map(); // stores language preference per user
 const semanticMemory = new Map(); // vector embeddings for semantic recall
+console.log("🔍 Memory maps initialized!");
 const personalityProfiles = new Map(); // dynamic personality adaptation per user
 const behavioralPatterns = new Map(); // user behavior patterns
 const responseQuality = new Map(); // track response effectiveness
+const moodHistory = new Map(); // track mood drift over time
+const personalityTrends = new Map(); // track personality evolution over time
+const relationshipTypes = new Map(); // user-specific relationship personas
 
+// Reply Queue System - Prevent overlapping responses
+const replyQueue = new Map();
+
+// Message deduplication system - prevent processing duplicates on reconnect
+const processedMsgIds = [];
+function markProcessed(id) {
+  processedMsgIds.push(id);
+  if (processedMsgIds.length > 500) processedMsgIds.shift(); // simple LRU of 500
+}
+function alreadyProcessed(id) {
+  return processedMsgIds.includes(id);
+}
+
+// Create axios clients once with proper configuration
+const aiClient = axios.create({
+  baseURL: CONFIG.AI_API_URL,
+  headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer dummy' },
+  timeout: 15000
+});
+const embedClient = axios.create({
+  baseURL: CONFIG.AI_EMBEDDING_URL,
+  headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer dummy' },
+  timeout: 15000
+});
+
+console.log("🔍 Setting up utility functions...");
 // Debounced save system
 let saveTimer;
 function scheduleSave() {
@@ -52,25 +102,22 @@ function scheduleSave() {
   saveTimer = setTimeout(saveMemory, CONFIG.MEMORY_SAVE_DEBOUNCE);
 }
 
+console.log("🔍 Setting up semantic memory functions...");
 // Semantic Memory System with Vector Embeddings
+console.log("🔍 About to define generateEmbedding...");
 async function generateEmbedding(text) {
   try {
-    const response = await axios.post(CONFIG.AI_EMBEDDING_URL, {
+    const { data } = await embedClient.post('', {
       model: CONFIG.AI_MODELS.embedding,
       input: text
-    }, {
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': 'Bearer dummy'
-      },
-      timeout: 15000
     });
-    return response.data.data[0].embedding;
+    return data.data?.[0]?.embedding || null;
   } catch (error) {
     logger.error({ error: error.message }, '❌ Embedding generation failed');
     return null;
   }
 }
+console.log("🔍 generateEmbedding defined successfully!");
 
 // Calculate cosine similarity between two vectors
 function cosineSimilarity(vecA, vecB) {
@@ -88,8 +135,10 @@ function cosineSimilarity(vecA, vecB) {
   
   return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
 }
+console.log("🔍 cosineSimilarity defined successfully!");
 
-// Search semantic memory for similar conversations
+// Search semantic memory for similar conversations with weighted relevance
+console.log("🔍 About to define searchSemanticMemory...");
 async function searchSemanticMemory(sender, currentText, threshold = CONFIG.EMBEDDING_SIMILARITY_THRESHOLD) {
   const userSemanticMemory = semanticMemory.get(sender) || [];
   if (userSemanticMemory.length === 0) return [];
@@ -97,18 +146,92 @@ async function searchSemanticMemory(sender, currentText, threshold = CONFIG.EMBE
   const currentEmbedding = await generateEmbedding(currentText);
   if (!currentEmbedding) return [];
   
-  const similarities = userSemanticMemory.map(memory => ({
-    ...memory,
-    similarity: cosineSimilarity(currentEmbedding, memory.embedding)
-  }));
+  const similarities = userSemanticMemory.map(memory => {
+    const similarity = cosineSimilarity(currentEmbedding, memory.embedding);
+    // Calculate weighted relevance combining similarity and emotional weight
+    const weightedRelevance = similarity * (memory.weight || 0.5);
+    
+    return {
+      ...memory,
+      similarity,
+      weightedRelevance,
+      content: memory.text // Ensure consistent field naming
+    };
+  });
   
   return similarities
     .filter(memory => memory.similarity >= threshold)
-    .sort((a, b) => b.similarity - a.similarity)
-    .slice(0, 3); // Top 3 most similar memories
+    .sort((a, b) => b.weightedRelevance - a.weightedRelevance) // Sort by weighted relevance
+    .slice(0, 3); // Top 3 most relevant memories
 }
+console.log("🔍 searchSemanticMemory defined successfully!");
 
-// Store conversation chunk with embedding
+// Self-reflection and meta-cognitive evaluation
+console.log("🔍 About to define selfReflect...");
+async function selfReflect(sender, userMsg, reply, emotion, intent) {
+  try {
+    const reflectionPrompt = `
+Evaluate this conversation exchange:
+User: "${userMsg}"
+Bot: "${reply}"
+Detected emotion: ${emotion}
+Detected intent: ${intent}
+
+Was the bot's response:
+1. Appropriately emotional and empathetic?
+2. Contextually relevant?
+3. Human-like and natural?
+
+Provide a brief assessment and one specific improvement suggestion for next time.
+Format: "Assessment: [good/needs improvement] | Suggestion: [specific advice]"`;
+
+    const reflectionRes = await aiClient.post('', {
+      model: CONFIG.AI_MODELS.summarization, // Use efficient model for reflection
+      messages: [
+        { 
+          role: 'system', 
+          content: 'You are a conversation quality evaluator. Be concise and constructive.' 
+        },
+        { role: 'user', content: reflectionPrompt }
+      ],
+      temperature: 0.3,
+      max_tokens: 100
+    });
+
+    const reflection = reflectionRes.data.choices?.[0]?.message?.content || '';
+    
+    // Store reflection for future improvement
+    if (!responseQuality.has(sender)) {
+      responseQuality.set(sender, []);
+    }
+    
+    const qualityHistory = responseQuality.get(sender);
+    qualityHistory.push({
+      timestamp: new Date().toISOString(),
+      userMsg: userMsg.substring(0, 50),
+      botReply: reply.substring(0, 50),
+      emotion,
+      intent,
+      reflection: reflection.substring(0, 200),
+      score: reflection.includes('good') ? 0.8 : 0.4
+    });
+    
+    // Keep only last 10 reflections
+    if (qualityHistory.length > 10) {
+      qualityHistory.shift();
+    }
+    
+    responseQuality.set(sender, qualityHistory);
+    
+    logger.debug({ sender, reflection: reflection.substring(0, 100) }, '🔍 Self-reflection completed');
+    
+  } catch (error) {
+    logger.error({ error: error.message }, '❌ Self-reflection failed');
+  }
+}
+console.log("🔍 selfReflect defined successfully!");
+
+console.log("🔍 About to define storeSemanticMemory...");
 async function storeSemanticMemory(sender, text, emotion, context) {
   const embedding = await generateEmbedding(text);
   if (!embedding) return;
@@ -133,8 +256,10 @@ async function storeSemanticMemory(sender, text, emotion, context) {
   semanticMemory.set(sender, userSemanticMemory);
   logger.debug({ sender, emotion, weight: memoryEntry.weight }, '🧠 Semantic memory stored');
 }
+console.log("🔍 storeSemanticMemory defined successfully!");
 
 // Intent Classification System
+console.log("🔍 About to define detectIntent...");
 function detectIntent(text) {
   const lowerText = text.toLowerCase();
   
@@ -165,26 +290,304 @@ function detectIntent(text) {
   
   return 'casual';
 }
+console.log("🔍 detectIntent defined successfully!");
 
-// Intelligent Model Router
-function selectModel(intent, emotion) {
+// Intelligent Model Router with Adaptive Scoring
+console.log("🔍 About to define selectModel...");
+function selectModel(intent, emotion, temporalContext, moodDrift) {
+  const modelScores = {
+    [CONFIG.AI_MODELS.factual]: 0.1,     // qwen2.5:14b
+    [CONFIG.AI_MODELS.emotional]: 0.1,   // gpt-oss:20b
+    [CONFIG.AI_MODELS.creative]: 0.1,    // gemma3:12b
+    [CONFIG.AI_MODELS.coding]: 0.1,      // qwen2.5-coder:7b
+    [CONFIG.AI_MODELS.summarization]: 0.1 // phi3:3.8b
+  };
+  
+  // Intent-based scoring
   switch (intent) {
-    case 'emotional':
-      return CONFIG.AI_MODELS.emotional;
     case 'question':
     case 'command':
-      return CONFIG.AI_MODELS.factual;
+      modelScores[CONFIG.AI_MODELS.factual] += 0.7;
+      break;
+    case 'emotional':
+      modelScores[CONFIG.AI_MODELS.emotional] += 0.8;
+      break;
     case 'technical':
-      return CONFIG.AI_MODELS.coding;
+      modelScores[CONFIG.AI_MODELS.coding] += 0.9;
+      break;
     case 'smalltalk':
-      return emotion === 'flirty' ? CONFIG.AI_MODELS.creative : CONFIG.AI_MODELS.emotional;
+      modelScores[CONFIG.AI_MODELS.creative] += 0.6;
+      break;
     default:
-      return CONFIG.AI_MODELS.emotional; // Default to emotional for natural conversation
+      modelScores[CONFIG.AI_MODELS.emotional] += 0.5; // Default to emotional
   }
+  
+  // Emotion-based scoring modifiers
+  if (['sad', 'anxious', 'frustrated'].includes(emotion)) {
+    modelScores[CONFIG.AI_MODELS.emotional] += 0.4;
+  }
+  
+  if (emotion === 'flirty') {
+    modelScores[CONFIG.AI_MODELS.creative] += 0.5;
+    modelScores[CONFIG.AI_MODELS.emotional] += 0.3;
+  }
+  
+  if (emotion === 'happy' || emotion === 'excited') {
+    modelScores[CONFIG.AI_MODELS.creative] += 0.3;
+  }
+  
+  // Temporal context scoring
+  if (temporalContext?.timeContext === 'late_night') {
+    modelScores[CONFIG.AI_MODELS.emotional] += 0.2; // More intimate at night
+  }
+  
+  if (temporalContext?.isWeekend) {
+    modelScores[CONFIG.AI_MODELS.creative] += 0.1; // More playful on weekends
+  }
+  
+  // Mood drift influence
+  if (moodDrift?.moodScore < -0.5) {
+    modelScores[CONFIG.AI_MODELS.emotional] += 0.3; // Prioritize empathy for negative mood drift
+  }
+  
+  if (moodDrift?.moodScore > 0.5) {
+    modelScores[CONFIG.AI_MODELS.creative] += 0.2; // More creative for positive mood drift
+  }
+  
+  // Select highest scoring model
+  const selectedEntry = Object.entries(modelScores)
+    .sort((a, b) => b[1] - a[1])[0];
+  
+  const selectedModel = selectedEntry[0];
+  const confidence = selectedEntry[1];
+  
+  logger.debug({ 
+    intent, 
+    emotion, 
+    temporal: temporalContext?.timeContext,
+    scores: modelScores, 
+    selected: selectedModel, 
+    confidence: confidence.toFixed(2) 
+  }, '🤖 Adaptive model selection');
+  
+  return selectedModel;
+}
+console.log("🔍 selectModel defined successfully!");
+
+// Evolving Personality System - "Daud learns to become himself"
+console.log("🔍 About to define evolvePersonality...");
+function evolvePersonality(sender, conversationOutcome, traits) {
+  const currentTrend = personalityTrends.get(sender) || {
+    curiosity: 0.8,
+    empathy: 0.9,
+    humor: 0.6,
+    flirtiness: 0.7,
+    logic: 0.8,
+    playfulness: 0.7,
+    lastEvolution: Date.now(),
+    evolutionCount: 0
+  };
+  
+  // Evolution rate - slower evolution for stability
+  const EVOLUTION_RATE = 0.05;
+  
+  // Positive outcome rewards successful traits
+  if (conversationOutcome === 'positive') {
+    Object.keys(traits).forEach(trait => {
+      if (traits[trait] > 0.7) { // High trait usage
+        currentTrend[trait] = Math.min(1.0, 
+          currentTrend[trait] * (1 - EVOLUTION_RATE) + traits[trait] * EVOLUTION_RATE
+        );
+      }
+    });
+  }
+  
+  // Negative outcome adjusts traits down slightly
+  if (conversationOutcome === 'negative') {
+    Object.keys(traits).forEach(trait => {
+      if (traits[trait] > 0.8) { // Overly high trait usage
+        currentTrend[trait] = Math.max(0.1, 
+          currentTrend[trait] * (1 + EVOLUTION_RATE) - 0.1
+        );
+      }
+    });
+  }
+  
+  currentTrend.lastEvolution = Date.now();
+  currentTrend.evolutionCount += 1;
+  
+  personalityTrends.set(sender, currentTrend);
+  
+  logger.debug({ 
+    sender, 
+    outcome: conversationOutcome, 
+    evolution: currentTrend,
+    count: currentTrend.evolutionCount 
+  }, '🧬 Personality evolved');
+  
+  return currentTrend;
 }
 
-// Dynamic Personality Adaptation
+// Memory-based trait dominance - personality follows conversation domain
+function adjustTraitsForDomain(sender, text, currentTraits) {
+  const adjustedTraits = { ...currentTraits };
+  const lowerText = text.toLowerCase();
+  
+  // Work/serious domains
+  if (/work|project|deadline|job|career|business|meeting|task/.test(lowerText)) {
+    adjustedTraits.logic = Math.min(1.0, adjustedTraits.logic + 0.1);
+    adjustedTraits.empathy = Math.min(1.0, adjustedTraits.empathy + 0.05);
+    adjustedTraits.playfulness = Math.max(0.1, adjustedTraits.playfulness - 0.05);
+  }
+  
+  // Emotional/relationship domains
+  if (/love|relationship|family|friend|feel|heart|miss|care|emotion/.test(lowerText)) {
+    adjustedTraits.empathy = Math.min(1.0, adjustedTraits.empathy + 0.15);
+    adjustedTraits.flirtiness = Math.min(1.0, adjustedTraits.flirtiness + 0.1);
+    adjustedTraits.logic = Math.max(0.1, adjustedTraits.logic - 0.05);
+  }
+  
+  // Fun/creative domains
+  if (/game|fun|joke|laugh|dream|art|music|creative|play|adventure/.test(lowerText)) {
+    adjustedTraits.playfulness = Math.min(1.0, adjustedTraits.playfulness + 0.1);
+    adjustedTraits.humor = Math.min(1.0, adjustedTraits.humor + 0.1);
+    adjustedTraits.curiosity = Math.min(1.0, adjustedTraits.curiosity + 0.05);
+  }
+  
+  // Learning/intellectual domains
+  if (/learn|study|book|idea|think|understand|explain|knowledge|question/.test(lowerText)) {
+    adjustedTraits.curiosity = Math.min(1.0, adjustedTraits.curiosity + 0.15);
+    adjustedTraits.logic = Math.min(1.0, adjustedTraits.logic + 0.1);
+  }
+  
+  return adjustedTraits;
+}
+
+// User-tailored Personas - Relationship-specific personality profiles
+function determineRelationshipType(sender, conversationHistory) {
+  const history = conversationHistory || [];
+  const recentMessages = history.slice(-20).map(h => h.content).join(' ').toLowerCase();
+  
+  const relationshipPatterns = {
+    romantic: {
+      keywords: /love|babe|sayang|miss|rindu|cute|handsome|beautiful|kiss|hug|❤️|💕|😘/,
+      score: 0,
+      traits: { flirtiness: 0.9, empathy: 0.9, playfulness: 0.8, humor: 0.7 }
+    },
+    friend: {
+      keywords: /friend|buddy|bro|sis|hang out|chill|fun|game|movie|laugh|joke/,
+      score: 0,
+      traits: { playfulness: 0.9, humor: 0.9, curiosity: 0.8, empathy: 0.7 }
+    },
+    counselor: {
+      keywords: /problem|advice|help|sad|depressed|stress|worry|anxious|hurt|pain/,
+      score: 0,
+      traits: { empathy: 1.0, logic: 0.8, curiosity: 0.7, humor: 0.3 }
+    },
+    mentor: {
+      keywords: /learn|teach|explain|understand|study|work|career|goal|improve/,
+      score: 0,
+      traits: { logic: 0.9, curiosity: 0.9, empathy: 0.7, humor: 0.6 }
+    },
+    companion: {
+      keywords: /daily|routine|chat|talk|share|boring|random|anything|everything/,
+      score: 0,
+      traits: { curiosity: 0.8, empathy: 0.8, humor: 0.7, playfulness: 0.7 }
+    }
+  };
+  
+  // Score each relationship type
+  Object.keys(relationshipPatterns).forEach(type => {
+    const pattern = relationshipPatterns[type];
+    const matches = (recentMessages.match(pattern.keywords) || []).length;
+    pattern.score = matches;
+  });
+  
+  // Find dominant relationship type
+  const dominantType = Object.entries(relationshipPatterns)
+    .sort((a, b) => b[1].score - a[1].score)[0];
+  
+  const relationshipType = dominantType[1].score > 0 ? dominantType[0] : 'companion';
+  
+  // Store relationship type
+  relationshipTypes.set(sender, {
+    type: relationshipType,
+    traits: relationshipPatterns[relationshipType].traits,
+    confidence: Math.min(1.0, dominantType[1].score / 10),
+    lastUpdated: Date.now()
+  });
+  
+  logger.debug({ 
+    sender, 
+    relationshipType, 
+    confidence: relationshipPatterns[relationshipType].score,
+    traits: relationshipPatterns[relationshipType].traits 
+  }, '💞 Relationship persona determined');
+  
+  return relationshipPatterns[relationshipType].traits;
+}
+
+// Apply relationship-specific personality bias
+function applyRelationshipPersona(sender, baseTraits, conversationHistory) {
+  const relationship = relationshipTypes.get(sender);
+  
+  if (!relationship || Date.now() - relationship.lastUpdated > 7 * 24 * 60 * 60 * 1000) {
+    // Re-determine relationship if stale or missing
+    const personaTraits = determineRelationshipType(sender, conversationHistory);
+    return blendTraits(baseTraits, personaTraits, 0.3); // 30% persona influence
+  }
+  
+  return blendTraits(baseTraits, relationship.traits, 0.3);
+}
+
+function blendTraits(baseTraits, personaTraits, influence) {
+  const blended = {};
+  
+  Object.keys(baseTraits).forEach(trait => {
+    const baseValue = baseTraits[trait];
+    const personaValue = personaTraits[trait] || baseValue;
+    blended[trait] = baseValue * (1 - influence) + personaValue * influence;
+  });
+  
+  return blended;
+}
+
+// Reply Queue System to prevent overlapping messages
+async function enqueueReply(sender, replyAction) {
+  const existingQueue = replyQueue.get(sender) || Promise.resolve();
+  
+  const newQueue = existingQueue
+    .then(async () => {
+      try {
+        await replyAction();
+      } catch (error) {
+        logger.error({ sender, error: error.message }, '❌ Queued reply failed');
+      }
+    })
+    .catch(error => {
+      logger.error({ sender, error: error.message }, '❌ Queue processing error');
+    });
+  
+  replyQueue.set(sender, newQueue);
+  return newQueue;
+}
+
+// Dynamic Personality Adaptation with Evolution
 function getPersonalityProfile(sender) {
+  // Use evolved personality trends if available
+  const evolved = personalityTrends.get(sender);
+  if (evolved) {
+    return {
+      curiosity: evolved.curiosity,
+      empathy: evolved.empathy,
+      humor: evolved.humor,
+      flirtiness: evolved.flirtiness,
+      logic: evolved.logic,
+      playfulness: evolved.playfulness
+    };
+  }
+  
+  // Default profile for new users
   const defaultProfile = {
     curiosity: 0.8,
     empathy: 0.9,
@@ -194,12 +597,19 @@ function getPersonalityProfile(sender) {
     playfulness: 0.7
   };
   
-  return personalityProfiles.get(sender) || defaultProfile;
+  return defaultProfile;
 }
 
-function adaptPersonality(sender, emotion, intent) {
+function adaptPersonality(sender, emotion, intent, messageText) {
   const profile = getPersonalityProfile(sender);
-  const adaptation = { ...profile };
+  let adaptation = { ...profile };
+  
+  // Apply domain-based trait adjustments
+  adaptation = adjustTraitsForDomain(sender, messageText || '', adaptation);
+  
+  // Apply relationship-specific persona
+  const conversationHistory = chatMemory.get(sender) || [];
+  adaptation = applyRelationshipPersona(sender, adaptation, conversationHistory);
   
   // Emotional adaptations
   if (emotion === 'sad') {
@@ -220,7 +630,19 @@ function adaptPersonality(sender, emotion, intent) {
   }
   
   personalityProfiles.set(sender, adaptation);
-  return adaptation;
+  
+  // Calculate dominant traits for context
+  const dominantTraits = Object.entries(adaptation)
+    .filter(([trait, value]) => value > 0.7)
+    .map(([trait]) => trait);
+  
+  const confidence = Object.values(adaptation).reduce((sum, val) => sum + val, 0) / Object.keys(adaptation).length;
+  
+  // Get relationship context
+  const relationship = relationshipTypes.get(sender);
+  const relationshipContext = relationship ? relationship.type : 'companion';
+  
+  return { ...adaptation, dominantTraits, confidence, relationshipType: relationshipContext };
 }
 
 // Natural Behavior Simulation
@@ -264,27 +686,122 @@ function shouldSkipResponse(sender, messageText) {
   return false;
 }
 
-// Temporal Awareness
+// Emotion persistence and mood drift tracking
+function trackMoodDrift(sender, currentEmotion) {
+  const history = moodHistory.get(sender) || [];
+  const now = Date.now();
+  
+  // Add current mood entry
+  history.push({
+    emotion: currentEmotion,
+    timestamp: now,
+    hour: new Date().getHours()
+  });
+  
+  // Keep last 20 mood entries
+  const recentHistory = history.slice(-20);
+  moodHistory.set(sender, recentHistory);
+  
+  // Calculate mood consistency and drift
+  const last24h = recentHistory.filter(entry => now - entry.timestamp < 24 * 60 * 60 * 1000);
+  
+  if (last24h.length > 0) {
+    const moodCounts = {};
+    last24h.forEach(entry => {
+      moodCounts[entry.emotion] = (moodCounts[entry.emotion] || 0) + 1;
+    });
+    
+    const dominantMood = Object.entries(moodCounts)
+      .sort((a, b) => b[1] - a[1])[0]?.[0] || 'neutral';
+    
+    const moodScore = calculateMoodScore(last24h, currentEmotion);
+    
+    // Update persistent tone based on mood drift
+    const currentTone = toneMemory.get(sender) || 'neutral';
+    let adjustedTone = currentTone;
+    
+    if (dominantMood === 'sad' && moodScore < -0.5) {
+      adjustedTone = 'emotional';
+    } else if (dominantMood === 'happy' && moodScore > 0.5) {
+      adjustedTone = 'playful';
+    } else if (dominantMood === 'flirty') {
+      adjustedTone = 'flirty';
+    }
+    
+    if (adjustedTone !== currentTone) {
+      toneMemory.set(sender, adjustedTone);
+      logger.debug({ sender, oldTone: currentTone, newTone: adjustedTone, moodScore }, '🎭 Mood drift adjusted tone');
+    }
+    
+    return { dominantMood, moodScore, adjustedTone };
+  }
+  
+  return { dominantMood: currentEmotion, moodScore: 0, adjustedTone: 'neutral' };
+}
+
+function calculateMoodScore(moodHistory, currentEmotion) {
+  let score = 0;
+  const weights = { happy: 1, excited: 1, flirty: 0.5, neutral: 0, sad: -1, frustrated: -1, anxious: -0.8 };
+  
+  moodHistory.forEach((entry, index) => {
+    const weight = weights[entry.emotion] || 0;
+    const recency = (index + 1) / moodHistory.length; // More recent = higher influence
+    score += weight * recency;
+  });
+  
+  return score / Math.max(moodHistory.length, 1);
+}
+
+// Enhanced temporal awareness with timezone support
 function getTemporalContext() {
+  const tz = 'Asia/Jakarta';
   const now = new Date();
-  const hour = now.getHours();
+  const hour = parseInt(now.toLocaleString('en-US', { timeZone: tz, hour: 'numeric', hour12: false }));
   const day = now.getDay();
+  const dayName = now.toLocaleDateString('en-US', { timeZone: tz, weekday: 'long' });
   
   let timeContext = '';
+  let greeting = '';
+  let mood = '';
   
-  if (hour >= 5 && hour < 12) {
-    timeContext = 'morning';
+  if (hour >= 5 && hour < 10) {
+    timeContext = 'early_morning';
+    greeting = hour < 7 ? 'good morning! ☀️' : 'morning! ☀️';
+    mood = 'fresh, energetic';
+  } else if (hour >= 10 && hour < 12) {
+    timeContext = 'late_morning';
+    greeting = '';
+    mood = 'productive, focused';
   } else if (hour >= 12 && hour < 17) {
     timeContext = 'afternoon';
-  } else if (hour >= 17 && hour < 22) {
+    greeting = '';
+    mood = 'calm, steady';
+  } else if (hour >= 17 && hour < 20) {
+    timeContext = 'early_evening';
+    greeting = '';
+    mood = 'relaxed, social';
+  } else if (hour >= 20 && hour < 23) {
     timeContext = 'evening';
+    greeting = '';
+    mood = 'cozy, reflective';
   } else {
-    timeContext = 'night';
+    timeContext = 'late_night';
+    greeting = hour >= 23 ? 'late night vibes 🌙' : '';
+    mood = 'intimate, thoughtful';
   }
   
   const isWeekend = day === 0 || day === 6;
+  const workContext = isWeekend ? 'weekend' : 'weekday';
   
-  return { timeContext, hour, isWeekend };
+  return { 
+    timeContext, 
+    hour, 
+    isWeekend, 
+    dayName, 
+    greeting,
+    mood,
+    workContext
+  };
 }
 
 // Self-Evaluation System
@@ -405,18 +922,24 @@ function analyzeBehavioralPattern(sender) {
 }
 
 function getAllMemoriesForSender(sender) {
-  const allMemories = [];
-  
-  // Collect from all memory types
-  [shortTermMemory, longTermMemory, emotionalMemory, toneMemory, languageMemory].forEach(memoryMap => {
-    if (memoryMap.has(sender)) {
-      const memories = Array.isArray(memoryMap.get(sender)) ? 
-        memoryMap.get(sender) : [memoryMap.get(sender)];
-      allMemories.push(...memories);
-    }
-  });
-  
-  return allMemories.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+  const all = [];
+
+  const shortTerm = chatMemory.get(sender) || [];
+  shortTerm.forEach(m => all.push({ type: 'short_term', message: m.content, timestamp: 0 }));
+
+  const longTerm = longTermMemory.get(sender) || [];
+  longTerm.forEach(s => all.push({ type: 'long_term', message: s.summary, timestamp: new Date(s.timestamp || Date.now()).getTime() }));
+
+  const events = emotionalEvents.get(sender) || [];
+  events.forEach(e => all.push({ type: 'emotional', message: e.snippet, emotion: e.emotion, timestamp: new Date(e.timestamp).getTime() }));
+
+  const tone = toneMemory.get(sender);
+  if (tone) all.push({ type: 'tone', message: tone, timestamp: 0 });
+
+  const lang = languageMemory.get(sender);
+  if (lang) all.push({ type: 'language', message: lang, timestamp: 0 });
+
+  return all.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
 }
 
 function saveMemory() {
@@ -427,6 +950,10 @@ function saveMemory() {
       emotionalEvents: Object.fromEntries(emotionalEvents),
       toneMemory: Object.fromEntries(toneMemory),
       languageMemory: Object.fromEntries(languageMemory),
+      semanticMemory: Object.fromEntries(semanticMemory),
+      personalityTrends: Object.fromEntries(personalityTrends),
+      moodHistory: Object.fromEntries(moodHistory),
+      relationshipTypes: Object.fromEntries(relationshipTypes),
       lastSaved: new Date().toISOString()
     };
     fs.writeFileSync(CONFIG.MEMORY_FILE, JSON.stringify(memoryData, null, 2));
@@ -466,6 +993,26 @@ function loadMemory() {
         for (const [k, v] of Object.entries(data.languageMemory)) languageMemory.set(k, v);
       }
       
+      // Load semantic memory
+      if (data.semanticMemory) {
+        for (const [k, v] of Object.entries(data.semanticMemory)) semanticMemory.set(k, v);
+      }
+      
+      // Load personality trends
+      if (data.personalityTrends) {
+        for (const [k, v] of Object.entries(data.personalityTrends)) personalityTrends.set(k, v);
+      }
+      
+      // Load mood history
+      if (data.moodHistory) {
+        for (const [k, v] of Object.entries(data.moodHistory)) moodHistory.set(k, v);
+      }
+      
+      // Load relationship types
+      if (data.relationshipTypes) {
+        for (const [k, v] of Object.entries(data.relationshipTypes)) relationshipTypes.set(k, v);
+      }
+      
       logger.info('📚 Memory loaded from disk');
     } catch (e) {
       logger.error({ error: e.message }, '⚠️ Memory load error');
@@ -481,15 +1028,20 @@ function loadMemory() {
   }
 }
 
+console.log("🔍 About to load memory...");
 loadMemory();
+console.log("🔍 Memory loaded successfully!");
 
+console.log("🔍 Setting up connection variables...");
 // Connection retry configuration
 let reconnectAttempts = 0;
 let lastSuccessfulConnection = null;
 
+console.log("🔍 Setting up message buffer...");
 // Message buffer + debounce system
 const messageBuffer = new Map(); // temporary buffer to collect quick message bursts
 
+console.log("🔍 Setting up emotion detection...");
 // Emotional context tracker
 function detectEmotion(text) {
   const lowerText = text.toLowerCase();
@@ -717,7 +1269,7 @@ ${history.map(m => `${m.role}: ${m.content}`).join("\n")}
 `;
 
   try {
-    const res = await axios.post('https://ai.wush.site/v1/chat/completions', {
+    const res = await aiClient.post('', {
       model: "gpt-oss:20b",
       messages: [
         { role: "system", content: "you are a memory assistant who creates emotionally intelligent summaries of conversations. focus on feelings, important facts, and relationship dynamics. write in lowercase, be concise but meaningful." },
@@ -725,11 +1277,6 @@ ${history.map(m => `${m.role}: ${m.content}`).join("\n")}
       ],
       temperature: 0.7,
       max_tokens: 200
-    }, {
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": "Bearer dummy"
-      }
     });
 
     const summary = res.data.choices[0].message.content.toLowerCase();
@@ -864,9 +1411,14 @@ async function startBot() {
     try {
       const msg = msgUpsert.messages[0];
       if (!msg.message || msg.key.fromMe) return;
+      
+      // Deduplication check
+      if (alreadyProcessed(msg.key.id)) return;
+      markProcessed(msg.key.id);
 
       const sender = msg.key.remoteJid;
-      if (sender.includes('@g.us')) return; // ignore groups
+      // Ignore status broadcasts and groups
+      if (sender === 'status@broadcast' || sender.includes('@g.us')) return;
 
       const text =
         msg.message.conversation ||
@@ -875,18 +1427,21 @@ async function startBot() {
         '';
 
       if (!text.trim()) return; // skip empty messages
+      
+      // Skip trivial responses early
+      if (shouldSkipResponse(sender, text)) return;
 
       // Only talk to the allowed numbers
       const senderNumber = sender.split('@')[0];
       if (!isAllowedContact(senderNumber)) {
-        console.log('Ignoring message from unauthorized contact:', senderNumber);
+        logger.debug({ senderNumber }, 'Ignoring message from unauthorized contact');
         return;
       }
 
       // add the message to buffer
       if (!messageBuffer.has(sender)) messageBuffer.set(sender, []);
       messageBuffer.get(sender).push(text);
-      console.log('💬 received bubble:', text);
+      logger.debug({ text, sender }, '💬 Received message');
 
       // Language detection per user
       const lang = detectLanguage(text);
@@ -894,7 +1449,7 @@ async function startBot() {
       
       if (!currentLang || currentLang !== lang) {
         languageMemory.set(sender, lang);
-        console.log(`🌐 language updated for ${sender}: ${lang}`);
+        logger.debug({ sender, lang }, '🌐 Language updated');
         scheduleSave(); // Save when language changes
       }
 
@@ -909,18 +1464,18 @@ async function startBot() {
         messageBuffer.delete(sender);
         messageBuffer.delete(`${sender}_timer`);
 
-        console.log('🧩 summarizing burst:', allMessages);
+        logger.debug({ allMessages }, '🧩 Processing message burst');
 
         // Cognitive Analysis Phase
         const messageIntent = detectIntent(allMessages);
         const temporalContext = getTemporalContext();
         const behavioralPattern = analyzeBehavioralPattern(sender);
         
-        console.log('🧠 cognitive analysis:', { 
+        logger.debug({ 
           intent: messageIntent, 
           temporal: temporalContext.timeContext,
           isWeekend: temporalContext.isWeekend 
-        });
+        }, '🧠 Cognitive analysis');
 
         // Decay tone if inactive for too long
         decayTone(sender);
@@ -936,19 +1491,19 @@ async function startBot() {
           longTermContext = `\n(background context from past conversations: ${recentSummaries})`;
         }
 
-        // Detect emotional context and tone
+        // Detect emotional context and tone with mood drift tracking
         const emotion = detectEmotion(allMessages);
+        const moodDrift = trackMoodDrift(sender, emotion);
         const tone = detectTone(history, allMessages);
         const recentContext = limitedHistory.slice(-3).map(m => m.content).join(' ');
         
-        console.log(`🎭 detected emotion: ${emotion}`);
-        console.log(`🎨 tone detected: ${tone}`);
+        logger.debug({ emotion, tone, dominantMood: moodDrift.dominantMood, moodScore: moodDrift.moodScore.toFixed(2) }, '🎭 Emotional analysis');
         
         // Remember tone trend (smooth transition)
         const lastTone = toneMemory.get(sender);
         if (!lastTone || lastTone !== tone) {
           toneMemory.set(sender, tone);
-          console.log(`💾 tone memory updated for ${sender}: ${tone}`);
+          logger.debug({ sender, tone }, '💾 Tone memory updated');
           scheduleSave(); // Save when tone changes
         }
         
@@ -960,12 +1515,15 @@ async function startBot() {
           tone: tone
         });
         
-        // Retrieve relevant past conversations for context
-        const relevantMemories = await searchSemanticMemory(sender, allMessages, 2);
+        // Retrieve relevant past conversations for context with weighted relevance
+        const relevantMemories = await searchSemanticMemory(sender, allMessages, 0.65);
         let semanticContext = '';
         if (relevantMemories.length > 0) {
-          semanticContext = '\n(similar past conversations: ' + 
-            relevantMemories.map(m => `"${m.content.substring(0, 50)}..." (${m.similarity.toFixed(2)})`).join(', ') + ')';
+          const weightedContext = relevantMemories.map(m => 
+            `[${(m.weightedRelevance).toFixed(2)}] ${m.content.substring(0, 80)}...`
+          ).join('\n');
+          semanticContext = `\nRelevant memories:\n${weightedContext}`;
+          logger.debug({ count: relevantMemories.length }, '🧠 Weighted memories recalled');
         }
         
         // Check for significant emotional events
@@ -1000,12 +1558,34 @@ async function startBot() {
 
         const prompt = allMessages + quoted + longTermContext + followUpContext + semanticContext;
 
-        // Select optimal AI model based on intent
-        const selectedModel = selectModel(messageIntent);
+        // Multi-step reasoning chain for decision transparency
+        const reasoningChain = [];
+        reasoningChain.push({ step: 'detect_intent', result: messageIntent, confidence: 0.8 });
+        reasoningChain.push({ step: 'detect_emotion', result: emotion, confidence: 0.7 });
+        reasoningChain.push({ step: 'temporal_context', result: temporalContext.timeContext, confidence: 1.0 });
+        reasoningChain.push({ step: 'mood_drift', result: moodDrift.dominantMood, confidence: moodDrift.moodScore });
+        
+        // Decision logic based on reasoning
+        if (emotion === 'sad' && messageIntent === 'question') {
+          reasoningChain.push({ step: 'prioritize_empathy', result: 'empathy_over_logic', reasoning: 'User is sad, prioritizing emotional support' });
+        }
+        
+        if (temporalContext.timeContext === 'late_night' && emotion !== 'neutral') {
+          reasoningChain.push({ step: 'adjust_intimacy', result: 'increase_warmth', reasoning: 'Late night + emotional = more intimate tone' });
+        }
+        
+        if (behavioralPattern.communicationStyle === 'playful' && emotion === 'happy') {
+          reasoningChain.push({ step: 'match_energy', result: 'playful_response', reasoning: 'Match user\'s playful energy' });
+        }
+        
+        console.log('🧠 reasoning chain:', reasoningChain.map(r => `${r.step}:${r.result}`).join(' → '));
+
+        // Select optimal AI model using adaptive scoring
+        const selectedModel = selectModel(messageIntent, emotion, temporalContext, moodDrift);
         console.log(`🤖 selected model: ${selectedModel} for intent: ${messageIntent}`);
         
-        // Apply dynamic personality adaptation
-        const personalityAdaptation = adaptPersonality(sender, emotion, messageIntent);
+        // Apply dynamic personality adaptation with domain awareness
+        const personalityAdaptation = adaptPersonality(sender, emotion, messageIntent, allMessages);
         console.log(`🎭 personality adaptation:`, personalityAdaptation);
 
         const persistentTone = toneMemory.get(sender) || tone;
@@ -1025,11 +1605,11 @@ async function startBot() {
             role: 'system',
             content: `${getPersonalityPrompt(emotion, recentContext, persistentTone)} ${langInstruction}
 
-Current temporal context: It's ${temporalContext.timeContext} (${temporalContext.hour}:00), ${temporalContext.isWeekend ? 'weekend' : 'weekday'}.
+${temporalContext.greeting ? temporalContext.greeting + ' ' : ''}Current time: ${temporalContext.timeContext} (${temporalContext.hour}:00), ${temporalContext.workContext}. Ambient mood: ${temporalContext.mood}.
 
-Personality adaptation: Your current traits are ${personalityAdaptation.dominantTraits.join(', ')} (confidence: ${personalityAdaptation.confidence.toFixed(2)}).
+Personality profile: You are currently expressing ${personalityAdaptation.dominantTraits.join(', ')} traits (${personalityAdaptation.relationshipType} relationship).
 
-Behavioral insights: User prefers ${behavioralPattern.communicationStyle} communication style.${semanticContext ? '\n' + semanticContext : ''}`
+Cognitive context: ${reasoningChain.slice(-2).map(r => r.step + ':' + r.result).join(', ')}.${semanticContext ? '\n' + semanticContext : ''}`
           },
           ...limitedHistory,
           {
@@ -1039,26 +1619,38 @@ Behavioral insights: User prefers ${behavioralPattern.communicationStyle} commun
         ];
 
         try {
-          const apiRes = await axios.post(
-            'https://ai.wush.site/v1/chat/completions',
-            {
-              model: 'gpt-oss:20b',
-              messages,
-              temperature: 0.85,
-              max_tokens: 150,
-              top_p: 0.9,
-              frequency_penalty: 0.3,
-              presence_penalty: 0.3
-            },
-            {
-              headers: {
-                'Content-Type': 'application/json',
-                'Authorization': 'Bearer dummy'
-              }
-            }
-          );
+          const apiRes = await aiClient.post('', {
+            model: selectedModel,
+            messages,
+            temperature: 0.85,
+            max_tokens: 150,
+            top_p: 0.9,
+            frequency_penalty: 0.3,
+            presence_penalty: 0.3
+          });
 
           let reply = (apiRes.data.choices?.[0]?.message?.content || '').trim().toLowerCase();
+          
+          // Enhanced structured logging for AI response
+          const usage = apiRes.data.usage || {};
+          logger.info({
+            sender,
+            intent: messageIntent,
+            emotion,
+            tone,
+            model: selectedModel,
+            temporalContext: temporalContext.timeContext,
+            relationshipType: personalityAdaptation.relationshipType,
+            dominantTraits: personalityAdaptation.dominantTraits,
+            moodScore: moodDrift.moodScore.toFixed(2),
+            tokens: {
+              prompt: usage.prompt_tokens || 0,
+              completion: usage.completion_tokens || 0,
+              total: usage.total_tokens || 0
+            },
+            responseLength: reply.length,
+            reasoning: reasoningChain.length
+          }, '🧩 AI response generated');
 
           // Smart fallback logic for empty or short AI responses
           if (!reply || reply.length < 3) {
@@ -1114,26 +1706,23 @@ Behavioral insights: User prefers ${behavioralPattern.communicationStyle} commun
 
           // Natural behavior simulation - calculate dynamic reply delay
           const replyDelay = calculateReplyDelay(reply, emotion, messageIntent);
-          console.log(`⏰ natural delay: ${replyDelay}ms (emotion: ${emotion}, intent: ${messageIntent})`);
+          logger.debug({ replyDelay, emotion, intent: messageIntent }, '⏰ Natural delay calculated');
           
-          // Show typing indicator for more natural feel
-          setTimeout(() => {
-            sock.sendPresenceUpdate('composing', sender);
-          }, Math.max(100, replyDelay * 0.3));
-
-          // Send response with natural delay
-          setTimeout(async () => {
-            await sock.sendPresenceUpdate('available', sender);
-            await sock.sendMessage(sender, { text: reply });
-            
-            // Start quality evaluation process
-            setTimeout(() => {
-              const qualityScore = evaluateResponseQuality(allMessages, reply, null);
-              updateQualityMetrics(sender, qualityScore);
-            }, CONFIG.QUALITY_EVALUATION_DELAY);
-            
-            await summarizeHistory(sender);
-          }, replyDelay);
+          // Send response with natural delay using queue system
+          enqueueReply(sender, async () => {
+            await sock.sendPresenceUpdate('composing', sender);
+            setTimeout(async () => {
+              await sock.sendPresenceUpdate('paused', sender);
+              await sock.sendMessage(sender, { text: reply });
+              
+              // Self-reflection after response (meta-cognitive layer)
+              setTimeout(() => {
+                selfReflect(sender, allMessages, reply, emotion, messageIntent);
+              }, 1000);
+              
+              await summarizeHistory(sender);
+            }, replyDelay);
+          });
 
         } catch (err) {
           console.error('❌ api or handler error:', err.message);
@@ -1166,6 +1755,25 @@ function startHealthMonitor() {
   }, CONFIG.HEALTH_CHECK_INTERVAL); // Check every 5 minutes
 }
 
+// Graceful shutdown handlers
+process.on('SIGINT', () => {
+  logger.info('🛑 SIGINT received: saving memory and exiting...');
+  try { saveMemory(); } catch {}
+  process.exit(0);
+});
+process.on('SIGTERM', () => {
+  logger.info('🛑 SIGTERM received: saving memory and exiting...');
+  try { saveMemory(); } catch {}
+  process.exit(0);
+});
+
 // Start the bot and health monitor
-startBot();
-startHealthMonitor();
+try {
+  console.log("🚀 About to start bot...");
+  startBot();
+  console.log("🏥 About to start health monitor...");
+  startHealthMonitor();
+  console.log("✅ All services started!");
+} catch (error) {
+  console.error("❌ Error starting services:", error);
+}
