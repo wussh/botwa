@@ -24,12 +24,12 @@ module.exports = {
   
   // Model routing based on intent
   AI_MODELS: {
-    emotional: 'gpt-oss:20b',        // empathetic, nuanced responses
-    factual: 'qwen2.5:14b',          // accurate information
-    creative: 'gemma3:12b',          // creative and flirty responses
-    summarization: 'phi3:3.8b',      // efficient summarization
-    coding: 'qwen2.5-coder:7b',      // technical responses
-    embedding: 'mxbai-embed-large:latest'  // semantic embeddings
+    emotional: 'vicuna:7b',        // empathetic, nuanced responses
+    factual: 'vicuna:7b',          // accurate information
+    creative: 'vicuna:7b',          // creative and flirty responses
+    summarization: 'vicuna:7b',      // efficient summarization
+    coding: 'vicuna:7b',      // technical responses
+    embedding: 'tazarov/all-minilm-l6-v2-f32:latest'  // semantic embeddings
   },
   
   AI_MAX_TOKENS: 150,
