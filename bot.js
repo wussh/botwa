@@ -85,12 +85,12 @@ function alreadyProcessed(id) {
 // Create axios clients once with proper configuration
 const aiClient = axios.create({
   baseURL: CONFIG.AI_API_URL,
-  headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer dummy' },
+  headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ollama' },
   timeout: 15000
 });
 const embedClient = axios.create({
   baseURL: CONFIG.AI_EMBEDDING_URL,
-  headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer dummy' },
+  headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ollama' },
   timeout: 15000
 });
 
