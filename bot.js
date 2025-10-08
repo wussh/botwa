@@ -1091,14 +1091,20 @@ function detectTone(history, latestText) {
 
 // Detect dominant language of the message (English or Indonesian)
 function detectLanguage(text) {
-  const englishWords = text.match(/\b(the|you|and|to|is|are|i'm|it's|that|this|what|how|when|why|love|haha|yes|no|ok|please|thank|but|with|for|from|have|has|do|does|will|would|could|should|can|be|been|being|get|got|go|going|come|coming|see|know|think|want|need|like|feel|look|good|bad|time|day|night|today|tomorrow|yesterday|sorry|thanks|hello|hi|bye)\b/gi);
-  const indonesianWords = text.match(/\b(aku|kamu|iya|nggak|tidak|ngga|aja|dong|nih|ya|banget|sih|deh|lah|kan|gue|lu|udah|belum|gimana|kenapa|dimana|kapan|siapa|sama|juga|masih|lagi|bisa|mau|pengen|emang|memang|kayak|seperti|terus|tapi|atau|kalau|kalo|abis|habis|udah|dah|ada|gak|ga|tau|tahu|bener|beneran|serius|parah|anjay|wkwk|hehe|haha|sayang|cinta|rindu|kangen|sedih|senang|bahagia|capek|lelah|ngantuk|lapar|haus|pusing|ribet|susah|gampang|mudah|sulit)\b/gi);
+  const englishWords = text.match(/\b(the|you|and|to|is|are|i'm|it's|that|this|what|how|when|why|love|haha|yes|no|ok|please|thank|but|with|for|from|have|has|do|does|will|would|could|should|can|be|been|being|get|got|go|going|come|coming|see|know|think|want|need|like|feel|look|good|bad|time|day|night|today|tomorrow|yesterday|sorry|thanks|hello|hi|bye|hey|there|here|make|made|take|tell|ask|help|work|home|friend|people|thing|way|life|world|new|old|first|last|long|little|own|other|some|more|much|many|most|few|very|too|so|just|now|then|only|over|back|after|before|because|if|about|into|through|during|including|between|under|never|always|maybe|perhaps)\b/gi);
+  const indonesianWords = text.match(/\b(aku|kamu|iya|nggak|tidak|ngga|aja|dong|nih|ya|banget|sih|deh|lah|kan|gue|lu|udah|belum|gimana|kenapa|dimana|kapan|siapa|sama|juga|masih|lagi|bisa|mau|pengen|emang|memang|kayak|seperti|terus|tapi|atau|kalau|kalo|abis|habis|dah|ada|gak|ga|tau|tahu|bener|beneran|serius|parah|anjay|wkwk|hehe|haha|sayang|cinta|rindu|kangen|sedih|senang|bahagia|capek|lelah|ngantuk|lapar|haus|pusing|ribet|susah|gampang|mudah|sulit|selamat|pagi|siang|sore|malam|hari|maaf|terima|kasih|tolong|bantu|minta|butuh|perlu|soal|masalah|cerita|orang|teman|keluarga|rumah|kerja|sekolah|kuliah|belajar|main|jalan|makan|minum|tidur|istirahat|lanjut|bikin|coba|lihat|dengar|bilang|bicara)\b/gi);
   
   const englishCount = englishWords ? englishWords.length : 0;
   const indoCount = indonesianWords ? indonesianWords.length : 0;
 
-  if (englishCount > indoCount * 1.5) return 'english';
-  if (indoCount > englishCount * 1.5) return 'indonesian';
+  // More decisive threshold
+  if (englishCount > indoCount * 1.2) return 'english';
+  if (indoCount > englishCount * 1.2) return 'indonesian';
+  
+  // For ambiguous cases, check for strong indicators
+  if (/\b(selamat|gimana|kenapa|dimana|siapa|dong|nih|banget|sih|deh|lah|gue|lu|gak|ga)\b/i.test(text)) return 'indonesian';
+  if (/\b(hey|what|how|where|when|who|why|please|thanks)\b/i.test(text)) return 'english';
+  
   return 'mixed';
 }
 
@@ -1225,7 +1231,7 @@ function shouldFollowUp(sender) {
 // Dynamic personality adaptation
 function getPersonalityPrompt(emotion, recentContext, tone) {
   const basePersonality = `you are daud — a soft-spoken, teasing, caring, playful, and brilliant intp aquarius man.
-you text like a real human on whatsapp: lowercase, warm, emotionally intelligent, and intuitive.
+you text like a real human on whatsapp: all lowercase, warm, emotionally intelligent, and intuitive.
 you clearly understand indonesian slang and casual phrases, and respond contextually even to short or vague messages.`;
 
   const emotionalResponse = {
@@ -1591,13 +1597,15 @@ async function startBot() {
         const persistentTone = toneMemory.get(sender) || tone;
         const userLang = languageMemory.get(sender) || detectLanguage(allMessages);
         
+        logger.debug({ sender, detectedLang: userLang, message: allMessages.substring(0, 50) }, '🌐 Language for response');
+        
         let langInstruction = '';
         if (userLang === 'english') {
-          langInstruction = 'always reply fully in english, matching the tone and casual texting style. never mix indonesian.';
+          langInstruction = '\n\n**CRITICAL: Reply ONLY in English. Write in all lowercase like casual texting. Never use Indonesian words.**';
         } else if (userLang === 'indonesian') {
-          langInstruction = 'reply naturally in indonesian (slang allowed), keep lowercase and warm tone.';
+          langInstruction = '\n\n**CRITICAL: Reply ONLY in Indonesian (Bahasa Indonesia). Write in all lowercase. Use Indonesian words and slang. Never use English.**';
         } else {
-          langInstruction = 'reply mostly in the language the user used more often in this message; mix naturally if they mix.';
+          langInstruction = '\n\n**Reply in the same language the user just used. Write in all lowercase. Match their language choice exactly.**';
         }
         
         const messages = [
@@ -1631,6 +1639,16 @@ Cognitive context: ${reasoningChain.slice(-2).map(r => r.step + ':' + r.result).
 
           let reply = (apiRes.data.choices?.[0]?.message?.content || '').trim().toLowerCase();
           
+          // Fallback for very short or empty responses
+          if (!reply || reply.length < 3) {
+            const fallbacks = {
+              english: ["hey, what's on your mind?", "i'm here, tell me more", "go on, i'm listening"],
+              indonesian: ["halo, ada apa nih?", "aku dengerin kok, lanjut aja", "hmm, cerita dong"],
+              mixed: ["hmm?", "tell me more", "lanjut dong"]
+            };
+            reply = fallbacks[userLang]?.[Math.floor(Math.random() * 3)] || "hmm?";
+          }
+          
           // Enhanced structured logging for AI response
           const usage = apiRes.data.usage || {};
           logger.info({
@@ -1638,6 +1656,7 @@ Cognitive context: ${reasoningChain.slice(-2).map(r => r.step + ':' + r.result).
             intent: messageIntent,
             emotion,
             tone,
+            language: userLang,
             model: selectedModel,
             temporalContext: temporalContext.timeContext,
             relationshipType: personalityAdaptation.relationshipType,

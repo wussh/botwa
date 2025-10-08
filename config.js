@@ -24,11 +24,11 @@ module.exports = {
   
   // Model routing based on intent
   AI_MODELS: {
-    emotional: 'vicuna:7b',        // empathetic, nuanced responses
-    factual: 'vicuna:7b',          // accurate information
-    creative: 'vicuna:7b',          // creative and flirty responses
-    summarization: 'vicuna:7b',      // efficient summarization
-    coding: 'vicuna:7b',      // technical responses
+    emotional: 'gemma3:12b-it-qat',        // empathetic, nuanced responses
+    factual: 'gemma3:12b-it-qat',          // accurate information
+    creative: 'gemma3:12b-it-qat',          // creative and flirty responses
+    summarization: 'gemma3:12b-it-qat',      // efficient summarization
+    coding: 'gemma3:12b-it-qat',      // technical responses
     embedding: 'tazarov/all-minilm-l6-v2-f32:latest'  // semantic embeddings
   },
   
