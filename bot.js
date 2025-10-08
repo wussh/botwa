@@ -2,6 +2,21 @@ const qrcode = require('qrcode-terminal');
 const { makeWASocket, useMultiFileAuthState, DisconnectReason } = require('baileys');
 const axios = require('axios');
 const fs = require('fs');
+const pino = require('pino');
+const CONFIG = require('./config');
+
+// Setup structured logging
+const logger = pino({
+  level: CONFIG.LOG_LEVEL,
+  transport: {
+    target: 'pino-pretty',
+    options: {
+      colorize: true,
+      translateTime: 'SYS:standard',
+      ignore: 'pid,hostname'
+    }
+  }
+});
 
 // Configuration - Set the WhatsApp numbers of people you want the bot to respond to
 // Format: include country code without +, example: "6281234567890" for Indonesia
@@ -16,7 +31,7 @@ function normalizePhoneNumber(phoneNumber) {
 // Function to check if sender is allowed
 function isAllowedContact(senderNumber) {
   const normalized = normalizePhoneNumber(senderNumber);
-  return ALLOWED_CONTACTS.some(contact => normalizePhoneNumber(contact) === normalized);
+  return CONFIG.ALLOWED_CONTACTS.some(contact => normalizePhoneNumber(contact) === normalized);
 }
 
 // Memory to keep context per user
@@ -25,22 +40,406 @@ const longTermMemory = new Map(); // long-term: emotional/factual summaries
 const emotionalEvents = new Map(); // emotional milestones worth remembering
 const toneMemory = new Map(); // stores tone style per user
 const languageMemory = new Map(); // stores language preference per user
+const semanticMemory = new Map(); // vector embeddings for semantic recall
+const personalityProfiles = new Map(); // dynamic personality adaptation per user
+const behavioralPatterns = new Map(); // user behavior patterns
+const responseQuality = new Map(); // track response effectiveness
+
+// Debounced save system
+let saveTimer;
+function scheduleSave() {
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(saveMemory, CONFIG.MEMORY_SAVE_DEBOUNCE);
+}
+
+// Semantic Memory System with Vector Embeddings
+async function generateEmbedding(text) {
+  try {
+    const response = await axios.post(CONFIG.AI_EMBEDDING_URL, {
+      model: CONFIG.AI_MODELS.embedding,
+      input: text
+    }, {
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer dummy'
+      },
+      timeout: 15000
+    });
+    return response.data.data[0].embedding;
+  } catch (error) {
+    logger.error({ error: error.message }, '❌ Embedding generation failed');
+    return null;
+  }
+}
+
+// Calculate cosine similarity between two vectors
+function cosineSimilarity(vecA, vecB) {
+  if (!vecA || !vecB || vecA.length !== vecB.length) return 0;
+  
+  let dotProduct = 0;
+  let normA = 0;
+  let normB = 0;
+  
+  for (let i = 0; i < vecA.length; i++) {
+    dotProduct += vecA[i] * vecB[i];
+    normA += vecA[i] * vecA[i];
+    normB += vecB[i] * vecB[i];
+  }
+  
+  return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
+}
+
+// Search semantic memory for similar conversations
+async function searchSemanticMemory(sender, currentText, threshold = CONFIG.EMBEDDING_SIMILARITY_THRESHOLD) {
+  const userSemanticMemory = semanticMemory.get(sender) || [];
+  if (userSemanticMemory.length === 0) return [];
+  
+  const currentEmbedding = await generateEmbedding(currentText);
+  if (!currentEmbedding) return [];
+  
+  const similarities = userSemanticMemory.map(memory => ({
+    ...memory,
+    similarity: cosineSimilarity(currentEmbedding, memory.embedding)
+  }));
+  
+  return similarities
+    .filter(memory => memory.similarity >= threshold)
+    .sort((a, b) => b.similarity - a.similarity)
+    .slice(0, 3); // Top 3 most similar memories
+}
+
+// Store conversation chunk with embedding
+async function storeSemanticMemory(sender, text, emotion, context) {
+  const embedding = await generateEmbedding(text);
+  if (!embedding) return;
+  
+  const userSemanticMemory = semanticMemory.get(sender) || [];
+  const memoryEntry = {
+    text,
+    emotion,
+    context,
+    embedding,
+    timestamp: new Date().toISOString(),
+    weight: emotion === 'sad' ? 1.0 : emotion === 'flirty' ? 0.8 : 0.5
+  };
+  
+  userSemanticMemory.push(memoryEntry);
+  
+  // Keep only recent semantic memories
+  if (userSemanticMemory.length > CONFIG.MAX_SEMANTIC_MEMORIES) {
+    userSemanticMemory.shift();
+  }
+  
+  semanticMemory.set(sender, userSemanticMemory);
+  logger.debug({ sender, emotion, weight: memoryEntry.weight }, '🧠 Semantic memory stored');
+}
+
+// Intent Classification System
+function detectIntent(text) {
+  const lowerText = text.toLowerCase();
+  
+  // Question patterns
+  if (/(apa|what|why|how|when|where|who|gimana|kenapa|kapan|dimana|siapa|\?)/i.test(lowerText)) {
+    return 'question';
+  }
+  
+  // Command patterns  
+  if (/(tell me|make|find|show|help|tolong|bantu|cariin|buatin)/i.test(lowerText)) {
+    return 'command';
+  }
+  
+  // Emotional expression
+  if (/(i feel|i'm|aku|feeling|sedih|senang|marah|kecewa|excited|love|hate|miss|rindu)/i.test(lowerText)) {
+    return 'emotional';
+  }
+  
+  // Technical/coding
+  if (/(code|function|bug|error|programming|javascript|python|html|css)/i.test(lowerText)) {
+    return 'technical';
+  }
+  
+  // Small talk
+  if (/(haha|lol|wkwk|hehe|hmm|ok|ya|iya|nice|cool)/i.test(lowerText)) {
+    return 'smalltalk';
+  }
+  
+  return 'casual';
+}
+
+// Intelligent Model Router
+function selectModel(intent, emotion) {
+  switch (intent) {
+    case 'emotional':
+      return CONFIG.AI_MODELS.emotional;
+    case 'question':
+    case 'command':
+      return CONFIG.AI_MODELS.factual;
+    case 'technical':
+      return CONFIG.AI_MODELS.coding;
+    case 'smalltalk':
+      return emotion === 'flirty' ? CONFIG.AI_MODELS.creative : CONFIG.AI_MODELS.emotional;
+    default:
+      return CONFIG.AI_MODELS.emotional; // Default to emotional for natural conversation
+  }
+}
+
+// Dynamic Personality Adaptation
+function getPersonalityProfile(sender) {
+  const defaultProfile = {
+    curiosity: 0.8,
+    empathy: 0.9,
+    humor: 0.6,
+    flirtiness: 0.7,
+    logic: 0.8,
+    playfulness: 0.7
+  };
+  
+  return personalityProfiles.get(sender) || defaultProfile;
+}
+
+function adaptPersonality(sender, emotion, intent) {
+  const profile = getPersonalityProfile(sender);
+  const adaptation = { ...profile };
+  
+  // Emotional adaptations
+  if (emotion === 'sad') {
+    adaptation.empathy = Math.min(1.0, adaptation.empathy + 0.1);
+    adaptation.humor = Math.max(0.1, adaptation.humor - 0.2);
+  } else if (emotion === 'flirty') {
+    adaptation.flirtiness = Math.min(1.0, adaptation.flirtiness + 0.1);
+    adaptation.playfulness = Math.min(1.0, adaptation.playfulness + 0.1);
+  } else if (emotion === 'frustrated') {
+    adaptation.empathy = Math.min(1.0, adaptation.empathy + 0.15);
+    adaptation.logic = Math.min(1.0, adaptation.logic + 0.1);
+  }
+  
+  // Intent adaptations
+  if (intent === 'question') {
+    adaptation.logic = Math.min(1.0, adaptation.logic + 0.1);
+    adaptation.curiosity = Math.min(1.0, adaptation.curiosity + 0.1);
+  }
+  
+  personalityProfiles.set(sender, adaptation);
+  return adaptation;
+}
+
+// Natural Behavior Simulation
+function calculateReplyDelay(replyText, emotion, intent) {
+  const baseDelay = CONFIG.MIN_REPLY_DELAY;
+  const lengthDelay = replyText.length * CONFIG.REPLY_DELAY_PER_CHAR;
+  const randomness = Math.random() * 1000;
+  
+  // Emotional modifiers
+  let emotionalModifier = 1.0;
+  if (emotion === 'sad') emotionalModifier = 1.3; // Slower, more thoughtful
+  if (emotion === 'excited' || emotion === 'happy') emotionalModifier = 0.8; // Faster
+  if (emotion === 'flirty') emotionalModifier = 1.1; // Slightly delayed, playful
+  
+  const totalDelay = Math.min(
+    CONFIG.MAX_REPLY_DELAY,
+    (baseDelay + lengthDelay + randomness) * emotionalModifier
+  );
+  
+  return Math.round(totalDelay);
+}
+
+// Contextual Response Management
+const consecutiveTrivialMessages = new Map();
+
+function shouldSkipResponse(sender, messageText) {
+  const trivialPattern = /^(ok|oke|ya+|iy+a+|hmm+|uh+|oh+|ah+|hehe+|haha+|lol+)$/i;
+  
+  if (trivialPattern.test(messageText.trim())) {
+    const count = (consecutiveTrivialMessages.get(sender) || 0) + 1;
+    consecutiveTrivialMessages.set(sender, count);
+    
+    if (count >= CONFIG.SKIP_RESPONSE_THRESHOLD) {
+      logger.debug({ sender, count }, '⏸️ Skipping response due to consecutive trivial messages');
+      return true;
+    }
+  } else {
+    consecutiveTrivialMessages.set(sender, 0); // Reset counter
+  }
+  
+  return false;
+}
+
+// Temporal Awareness
+function getTemporalContext() {
+  const now = new Date();
+  const hour = now.getHours();
+  const day = now.getDay();
+  
+  let timeContext = '';
+  
+  if (hour >= 5 && hour < 12) {
+    timeContext = 'morning';
+  } else if (hour >= 12 && hour < 17) {
+    timeContext = 'afternoon';
+  } else if (hour >= 17 && hour < 22) {
+    timeContext = 'evening';
+  } else {
+    timeContext = 'night';
+  }
+  
+  const isWeekend = day === 0 || day === 6;
+  
+  return { timeContext, hour, isWeekend };
+}
+
+// Self-Evaluation System
+const responseQualityHistory = new Map();
+
+function evaluateResponseQuality(originalMessage, generatedResponse, userReaction) {
+  const score = {
+    relevance: calculateRelevanceScore(originalMessage, generatedResponse),
+    engagement: calculateEngagementScore(userReaction),
+    timestamp: Date.now(),
+    messageType: originalMessage,
+    responseLength: generatedResponse.length
+  };
+  
+  return score;
+}
+
+function calculateRelevanceScore(originalMessage, response) {
+  // Simple keyword matching for relevance
+  const originalWords = originalMessage.toLowerCase().split(/\s+/);
+  const responseWords = response.toLowerCase().split(/\s+/);
+  
+  const commonWords = originalWords.filter(word => 
+    responseWords.some(rWord => rWord.includes(word) || word.includes(rWord))
+  );
+  
+  return Math.min(1.0, commonWords.length / Math.max(originalWords.length, 3));
+}
+
+function calculateEngagementScore(userReaction) {
+  // Measure engagement based on user's next response time and content
+  if (!userReaction) return 0.5; // Neutral if no reaction yet
+  
+  const positivePatterns = /thanks|terima|bagus|good|lucu|funny|haha|😊|😄|❤️|👍/i;
+  const negativePatterns = /gak|tidak|stop|bosan|boring|aneh|weird|😒|😞|👎/i;
+  
+  if (positivePatterns.test(userReaction)) return 0.8;
+  if (negativePatterns.test(userReaction)) return 0.2;
+  
+  return 0.5; // Neutral
+}
+
+function updateQualityMetrics(sender, qualityScore) {
+  if (!responseQualityHistory.has(sender)) {
+    responseQualityHistory.set(sender, []);
+  }
+  
+  const history = responseQualityHistory.get(sender);
+  history.push(qualityScore);
+  
+  // Keep only last 20 evaluations
+  if (history.length > 20) {
+    history.shift();
+  }
+  
+  responseQualityHistory.set(sender, history);
+  
+  // Calculate running averages
+  const avgRelevance = history.reduce((sum, item) => sum + item.relevance, 0) / history.length;
+  const avgEngagement = history.reduce((sum, item) => sum + item.engagement, 0) / history.length;
+  
+  logger.info({ 
+    sender, 
+    avgRelevance: avgRelevance.toFixed(2), 
+    avgEngagement: avgEngagement.toFixed(2),
+    sampleSize: history.length 
+  }, '📊 Quality metrics updated');
+  
+  return { avgRelevance, avgEngagement };
+}
+
+// Behavioral Pattern Learning
+function analyzeBehavioralPattern(sender) {
+  const memories = getAllMemoriesForSender(sender);
+  const patterns = {
+    preferredTopics: new Map(),
+    activeTimePatterns: [],
+    communicationStyle: 'neutral',
+    responsePreferences: new Map()
+  };
+  
+  // Analyze preferred topics
+  memories.forEach(memory => {
+    if (memory.type === 'short_term' || memory.type === 'long_term') {
+      const words = memory.message.toLowerCase().split(/\s+/);
+      words.forEach(word => {
+        if (word.length > 3) { // Skip short words
+          patterns.preferredTopics.set(word, (patterns.preferredTopics.get(word) || 0) + 1);
+        }
+      });
+    }
+  });
+  
+  // Analyze active time patterns
+  memories.forEach(memory => {
+    if (memory.timestamp) {
+      const hour = new Date(memory.timestamp).getHours();
+      patterns.activeTimePatterns.push(hour);
+    }
+  });
+  
+  // Determine communication style based on language choices
+  const recentEmotions = memories
+    .filter(m => m.type === 'emotional')
+    .slice(-10)
+    .map(m => m.emotion);
+  
+  if (recentEmotions.includes('excited') || recentEmotions.includes('happy')) {
+    patterns.communicationStyle = 'enthusiastic';
+  } else if (recentEmotions.includes('sad') || recentEmotions.includes('angry')) {
+    patterns.communicationStyle = 'supportive';
+  } else if (recentEmotions.includes('flirty')) {
+    patterns.communicationStyle = 'playful';
+  }
+  
+  logger.debug({ sender, patterns }, '🧠 Behavioral pattern analyzed');
+  return patterns;
+}
+
+function getAllMemoriesForSender(sender) {
+  const allMemories = [];
+  
+  // Collect from all memory types
+  [shortTermMemory, longTermMemory, emotionalMemory, toneMemory, languageMemory].forEach(memoryMap => {
+    if (memoryMap.has(sender)) {
+      const memories = Array.isArray(memoryMap.get(sender)) ? 
+        memoryMap.get(sender) : [memoryMap.get(sender)];
+      allMemories.push(...memories);
+    }
+  });
+  
+  return allMemories.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+}
 
 function saveMemory() {
-  const memoryData = {
-    shortTerm: Object.fromEntries(chatMemory),
-    longTerm: Object.fromEntries(longTermMemory),
-    emotionalEvents: Object.fromEntries(emotionalEvents),
-    toneMemory: Object.fromEntries(toneMemory),
-    languageMemory: Object.fromEntries(languageMemory)
-  };
-  fs.writeFileSync('memory/memory.json', JSON.stringify(memoryData, null, 2));
+  try {
+    const memoryData = {
+      shortTerm: Object.fromEntries(chatMemory),
+      longTerm: Object.fromEntries(longTermMemory),
+      emotionalEvents: Object.fromEntries(emotionalEvents),
+      toneMemory: Object.fromEntries(toneMemory),
+      languageMemory: Object.fromEntries(languageMemory),
+      lastSaved: new Date().toISOString()
+    };
+    fs.writeFileSync(CONFIG.MEMORY_FILE, JSON.stringify(memoryData, null, 2));
+    logger.debug('💾 Memory saved to disk');
+  } catch (error) {
+    logger.error({ error: error.message }, '❌ Failed to save memory');
+  }
 }
 
 function loadMemory() {
-  if (fs.existsSync('memory/memory.json')) {
+  if (fs.existsSync(CONFIG.MEMORY_FILE)) {
     try {
-      const data = JSON.parse(fs.readFileSync('memory/memory.json'));
+      const data = JSON.parse(fs.readFileSync(CONFIG.MEMORY_FILE));
       
       // Load short-term memory
       if (data.shortTerm) {
@@ -67,26 +466,29 @@ function loadMemory() {
         for (const [k, v] of Object.entries(data.languageMemory)) languageMemory.set(k, v);
       }
       
-      console.log('📚 loaded memory from disk');
+      logger.info('📚 Memory loaded from disk');
     } catch (e) {
-      console.error('⚠️ memory load error:', e.message);
+      logger.error({ error: e.message }, '⚠️ Memory load error');
+      // Create backup of corrupted file
+      const backupPath = `${CONFIG.MEMORY_FILE}.corrupted.${Date.now()}`;
+      try {
+        fs.renameSync(CONFIG.MEMORY_FILE, backupPath);
+        logger.warn({ backupPath }, '⚠️ Corrupted memory file backed up');
+      } catch (backupError) {
+        logger.error({ error: backupError.message }, '❌ Failed to backup corrupted file');
+      }
     }
   }
 }
 
 loadMemory();
-setInterval(saveMemory, 10000);
 
 // Connection retry configuration
 let reconnectAttempts = 0;
-const MAX_RECONNECT_ATTEMPTS = 5;
-const RECONNECT_DELAY = 5000; // 5 seconds
 let lastSuccessfulConnection = null;
 
 // Message buffer + debounce system
 const messageBuffer = new Map(); // temporary buffer to collect quick message bursts
-const DEBOUNCE_DELAY = 2000; // wait 2 seconds after last message
-const REPLY_DELAY = 2000; // wait 2 seconds before sending reply (human-like)
 
 // Emotional context tracker
 function detectEmotion(text) {
@@ -359,10 +761,10 @@ ${history.map(m => `${m.role}: ${m.content}`).join("\n")}
 
 // Function to clear auth and force relogin
 async function forceRelogin() {
-  console.log('🔄 Forcing relogin - clearing auth state...');
+  logger.info('🔄 Forcing relogin - clearing auth state...');
   try {
     // Clear auth folder
-    const authPath = './auth';
+    const authPath = CONFIG.AUTH_FOLDER;
     if (fs.existsSync(authPath)) {
       const files = fs.readdirSync(authPath);
       for (const file of files) {
@@ -371,16 +773,16 @@ async function forceRelogin() {
         }
       }
     }
-    console.log('✅ Auth state cleared, will need to scan QR code again');
+    logger.info('✅ Auth state cleared, will need to scan QR code again');
     reconnectAttempts = 0; // Reset attempts after forced relogin
   } catch (error) {
-    console.error('❌ Error clearing auth state:', error.message);
+    logger.error({ error: error.message }, '❌ Error clearing auth state');
   }
 }
 
 async function startBot() {
   // Load or create auth state in the "auth" folder
-  const { state, saveCreds } = await useMultiFileAuthState('auth');
+  const { state, saveCreds } = await useMultiFileAuthState(CONFIG.AUTH_FOLDER);
 
   const sock = makeWASocket({
     auth: state,
@@ -396,17 +798,17 @@ async function startBot() {
 
     // Show QR code if provided
     if (qr) {
-      console.log('Please scan the QR code below with your WhatsApp mobile app:');
+      logger.info('Please scan the QR code below with your WhatsApp mobile app:');
       qrcode.generate(qr, { small: true });
     }
 
     if (connection === 'close') {
       const reason = lastDisconnect?.error?.output?.statusCode;
-      console.log('Connection closed. Reason:', reason);
+      logger.warn({ reason }, 'Connection closed');
       
       // Check if logged out
       if (reason === DisconnectReason.loggedOut) {
-        console.log('❌ You are logged out. Clearing auth and requiring new login...');
+        logger.error('❌ Logged out. Clearing auth and requiring new login...');
         await forceRelogin();
         setTimeout(() => startBot(), 2000);
         return;
@@ -414,29 +816,31 @@ async function startBot() {
       
       // Handle other disconnection reasons
       let shouldReconnect = true;
-      let reconnectDelay = RECONNECT_DELAY;
+      let reconnectDelay = CONFIG.RECONNECT_DELAY;
       
       if (reason === DisconnectReason.connectionClosed || 
           reason === DisconnectReason.connectionLost ||
           reason === DisconnectReason.restartRequired) {
         
         reconnectAttempts++;
-        console.log(`⚠️ Connection failed (attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})`);
+        logger.warn({ attempt: reconnectAttempts, max: CONFIG.MAX_RECONNECT_ATTEMPTS }, '⚠️ Connection failed');
         
-        if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
-          console.log('❌ Max reconnection attempts reached. Forcing relogin...');
+        if (reconnectAttempts >= CONFIG.MAX_RECONNECT_ATTEMPTS) {
+          logger.error('❌ Max reconnection attempts reached. Forcing relogin...');
           await forceRelogin();
           setTimeout(() => startBot(), 5000);
           return;
         }
         
-        // Exponential backoff
-        reconnectDelay = RECONNECT_DELAY * Math.pow(2, reconnectAttempts - 1);
-        console.log(`🔄 Reconnecting in ${reconnectDelay/1000} seconds...`);
+        // Exponential backoff with jitter
+        reconnectDelay = CONFIG.RECONNECT_DELAY * Math.pow(2, reconnectAttempts - 1);
+        const jitter = Math.random() * 1000;
+        reconnectDelay += jitter;
+        logger.info({ delay: Math.round(reconnectDelay/1000) }, `🔄 Reconnecting in ${Math.round(reconnectDelay/1000)} seconds...`);
         
       } else if (reason === DisconnectReason.badSession || 
                  reason === DisconnectReason.sessionReplaced) {
-        console.log('❌ Bad session detected. Forcing relogin...');
+        logger.error('❌ Bad session detected. Forcing relogin...');
         await forceRelogin();
         setTimeout(() => startBot(), 2000);
         return;
@@ -447,11 +851,11 @@ async function startBot() {
       }
       
     } else if (connection === 'open') {
-      console.log('✅ Connected to WhatsApp!');
+      logger.info('✅ Connected to WhatsApp!');
       reconnectAttempts = 0; // Reset attempts on successful connection
       lastSuccessfulConnection = new Date();
     } else if (connection === 'connecting') {
-      console.log('🔄 Connecting to WhatsApp...');
+      logger.info('🔄 Connecting to WhatsApp...');
     }
   });
 
@@ -491,6 +895,7 @@ async function startBot() {
       if (!currentLang || currentLang !== lang) {
         languageMemory.set(sender, lang);
         console.log(`🌐 language updated for ${sender}: ${lang}`);
+        scheduleSave(); // Save when language changes
       }
 
       // clear previous timer if user is still typing
@@ -505,6 +910,17 @@ async function startBot() {
         messageBuffer.delete(`${sender}_timer`);
 
         console.log('🧩 summarizing burst:', allMessages);
+
+        // Cognitive Analysis Phase
+        const messageIntent = detectIntent(allMessages);
+        const temporalContext = getTemporalContext();
+        const behavioralPattern = analyzeBehavioralPattern(sender);
+        
+        console.log('🧠 cognitive analysis:', { 
+          intent: messageIntent, 
+          temporal: temporalContext.timeContext,
+          isWeekend: temporalContext.isWeekend 
+        });
 
         // Decay tone if inactive for too long
         decayTone(sender);
@@ -533,6 +949,23 @@ async function startBot() {
         if (!lastTone || lastTone !== tone) {
           toneMemory.set(sender, tone);
           console.log(`💾 tone memory updated for ${sender}: ${tone}`);
+          scheduleSave(); // Save when tone changes
+        }
+        
+        // Store semantic memory for cognitive recall
+        await storeSemanticMemory(sender, allMessages, {
+          emotion: emotion,
+          intent: messageIntent,
+          temporal: temporalContext,
+          tone: tone
+        });
+        
+        // Retrieve relevant past conversations for context
+        const relevantMemories = await searchSemanticMemory(sender, allMessages, 2);
+        let semanticContext = '';
+        if (relevantMemories.length > 0) {
+          semanticContext = '\n(similar past conversations: ' + 
+            relevantMemories.map(m => `"${m.content.substring(0, 50)}..." (${m.similarity.toFixed(2)})`).join(', ') + ')';
         }
         
         // Check for significant emotional events
@@ -565,7 +998,15 @@ async function startBot() {
           if (quotedText) quoted = `\n(context: replying to "${quotedText}")`;
         }
 
-        const prompt = allMessages + quoted + longTermContext + followUpContext;
+        const prompt = allMessages + quoted + longTermContext + followUpContext + semanticContext;
+
+        // Select optimal AI model based on intent
+        const selectedModel = selectModel(messageIntent);
+        console.log(`🤖 selected model: ${selectedModel} for intent: ${messageIntent}`);
+        
+        // Apply dynamic personality adaptation
+        const personalityAdaptation = adaptPersonality(sender, emotion, messageIntent);
+        console.log(`🎭 personality adaptation:`, personalityAdaptation);
 
         const persistentTone = toneMemory.get(sender) || tone;
         const userLang = languageMemory.get(sender) || detectLanguage(allMessages);
@@ -582,7 +1023,13 @@ async function startBot() {
         const messages = [
           {
             role: 'system',
-            content: `${getPersonalityPrompt(emotion, recentContext, persistentTone)} ${langInstruction}`
+            content: `${getPersonalityPrompt(emotion, recentContext, persistentTone)} ${langInstruction}
+
+Current temporal context: It's ${temporalContext.timeContext} (${temporalContext.hour}:00), ${temporalContext.isWeekend ? 'weekend' : 'weekday'}.
+
+Personality adaptation: Your current traits are ${personalityAdaptation.dominantTraits.join(', ')} (confidence: ${personalityAdaptation.confidence.toFixed(2)}).
+
+Behavioral insights: User prefers ${behavioralPattern.communicationStyle} communication style.${semanticContext ? '\n' + semanticContext : ''}`
           },
           ...limitedHistory,
           {
@@ -665,16 +1112,33 @@ async function startBot() {
           history.push({ role: 'assistant', content: reply });
           chatMemory.set(sender, history);
 
-          // wait 2 seconds before sending (looks natural)
+          // Natural behavior simulation - calculate dynamic reply delay
+          const replyDelay = calculateReplyDelay(reply, emotion, messageIntent);
+          console.log(`⏰ natural delay: ${replyDelay}ms (emotion: ${emotion}, intent: ${messageIntent})`);
+          
+          // Show typing indicator for more natural feel
+          setTimeout(() => {
+            sock.sendPresenceUpdate('composing', sender);
+          }, Math.max(100, replyDelay * 0.3));
+
+          // Send response with natural delay
           setTimeout(async () => {
+            await sock.sendPresenceUpdate('available', sender);
             await sock.sendMessage(sender, { text: reply });
+            
+            // Start quality evaluation process
+            setTimeout(() => {
+              const qualityScore = evaluateResponseQuality(allMessages, reply, null);
+              updateQualityMetrics(sender, qualityScore);
+            }, CONFIG.QUALITY_EVALUATION_DELAY);
+            
             await summarizeHistory(sender);
-          }, REPLY_DELAY);
+          }, replyDelay);
 
         } catch (err) {
           console.error('❌ api or handler error:', err.message);
         }
-      }, DEBOUNCE_DELAY); // wait 2s after last message before replying
+      }, CONFIG.DEBOUNCE_DELAY); // wait 2s after last message before replying
 
       messageBuffer.set(`${sender}_timer`, timer);
 
@@ -692,15 +1156,14 @@ function startHealthMonitor() {
   setInterval(async () => {
     if (lastSuccessfulConnection) {
       const timeSinceLastConnection = Date.now() - lastSuccessfulConnection.getTime();
-      const STALE_CONNECTION_THRESHOLD = 10 * 60 * 1000; // 10 minutes
       
-      if (timeSinceLastConnection > STALE_CONNECTION_THRESHOLD) {
-        console.log('⚠️ Connection appears stale. Forcing relogin...');
+      if (timeSinceLastConnection > CONFIG.STALE_CONNECTION_THRESHOLD) {
+        logger.warn('⚠️ Connection appears stale. Forcing relogin...');
         await forceRelogin();
         setTimeout(() => startBot(), 3000);
       }
     }
-  }, 5 * 60 * 1000); // Check every 5 minutes
+  }, CONFIG.HEALTH_CHECK_INTERVAL); // Check every 5 minutes
 }
 
 // Start the bot and health monitor
