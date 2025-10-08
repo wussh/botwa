@@ -39,7 +39,7 @@ console.log("🔍 Configuration validated!");
 console.log("🔍 Setting up contacts...");
 const ALLOWED_CONTACTS = Array.isArray(CONFIG.ALLOWED_CONTACTS) && CONFIG.ALLOWED_CONTACTS.length
   ? CONFIG.ALLOWED_CONTACTS
-  : ["6281261480997", "6283108490895","6285174237321","601162620212","6285298222159","6287832550290"];
+  : ["6283108490895","6285174237321","601162620212","6285298222159","6287832550290"];
 console.log("🔍 Contacts setup complete!");
 
 // Function to normalize phone number for comparison
