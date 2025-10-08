@@ -86,12 +86,12 @@ function alreadyProcessed(id) {
 const aiClient = axios.create({
   baseURL: CONFIG.AI_API_URL,
   headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ollama' },
-  timeout: 50000 // 50s to accommodate slower models
+  timeout: 25000 // 25s timeout (safe for models under 20s)
 });
 const embedClient = axios.create({
   baseURL: CONFIG.AI_EMBEDDING_URL,
   headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ollama' },
-  timeout: 20000 // 20s for embeddings
+  timeout: 15000 // 15s for embeddings (faster)
 });
 
 console.log("🔍 Setting up utility functions...");
@@ -1627,6 +1627,40 @@ Cognitive context: ${reasoningChain.slice(-2).map(r => r.step + ':' + r.result).
           }
         ];
 
+        // Validate AI response quality
+        function isValidResponse(text) {
+          if (!text || text.length < 2) return false;
+          
+          // Check for gibberish patterns (too many consecutive consonants, random characters)
+          const gibberishPatterns = [
+            /[bcdfghjklmnpqrstvwxyz]{7,}/i,  // 7+ consecutive consonants
+            /[^a-z0-9\s.,!?;:'"()-]{5,}/i,    // 5+ non-standard characters
+            /^\s*[a-z]{1,2}\s+[a-z]{1,2}\s+[a-z]{1,2}/i,  // "a b c d e" pattern
+          ];
+          
+          for (const pattern of gibberishPatterns) {
+            if (pattern.test(text)) {
+              logger.warn({ text: text.substring(0, 100) }, '⚠️ Detected gibberish response');
+              return false;
+            }
+          }
+          
+          // Check for reasonable word structure
+          const words = text.split(/\s+/).filter(w => w.length > 0);
+          if (words.length < 1) return false;
+          
+          // At least 30% of words should be recognizable (have vowels)
+          const wordsWithVowels = words.filter(w => /[aeiou]/i.test(w));
+          const vowelRatio = wordsWithVowels.length / words.length;
+          
+          if (vowelRatio < 0.3) {
+            logger.warn({ text: text.substring(0, 100), vowelRatio }, '⚠️ Too few vowels, likely gibberish');
+            return false;
+          }
+          
+          return true;
+        }
+        
         // Try primary model with fallback logic
         let reply = '';
         let apiRes = null;
@@ -1637,21 +1671,35 @@ Cognitive context: ${reasoningChain.slice(-2).map(r => r.step + ':' + r.result).
           apiRes = await aiClient.post('', {
             model: selectedModel,
             messages,
-            temperature: 0.85,
+            temperature: 0.7,  // Lower temperature for more coherent responses
             max_tokens: 150,
             top_p: 0.9,
             frequency_penalty: 0.3,
             presence_penalty: 0.3
           });
 
-          reply = (apiRes.data.choices?.[0]?.message?.content || '').trim().toLowerCase();
+          const rawReply = (apiRes.data.choices?.[0]?.message?.content || '').trim().toLowerCase();
+          
+          // Validate response quality
+          if (isValidResponse(rawReply)) {
+            reply = rawReply;
+          } else {
+            logger.warn({ model: selectedModel, rawReply: rawReply.substring(0, 100) }, '⚠️ Invalid response, treating as failure');
+            throw new Error('Invalid/gibberish response from model');
+          }
         } catch (primaryError) {
           logger.warn({ model: selectedModel, error: primaryError.message }, '⚠️ Primary model failed, trying fallback');
           
           // Only use fast models that respond within timeout
-          // Based on benchmarks: phi4 (2.6s), gemma3:1b (12.7s) are acceptable
-          // Removed: phi3 (16.5s), qwen2.5 (46s), mistral (39s), llama3.2 (27s)
-          const fallbackModels = ['phi4-mini-reasoning:3.8b', 'gemma3:1b-it-qat'];
+          // Based on latest benchmarks (all under 20s, safe with 50s timeout):
+          // phi3 (5.8s), gemma3:1b (6.4s), phi4 (8.4s), llama3.2 (8.1s), 
+          // gemma3:4b (11.9s), mistral (11.3s), qwen2.5 (18s), gemma3:12b (18.8s)
+          const fallbackModels = [
+            'phi3:3.8b',                // 5.8s - fastest overall
+            'gemma3:1b-it-qat',         // 6.4s - fast and stable
+            'llama3.2:latest',          // 8.1s - good balance
+            'phi4-mini-reasoning:3.8b'  // 8.4s - high quality reasoning
+          ];
           
           for (const fallbackModel of fallbackModels) {
             if (attemptedModels.includes(fallbackModel)) continue; // Skip if already tried
@@ -1661,17 +1709,26 @@ Cognitive context: ${reasoningChain.slice(-2).map(r => r.step + ':' + r.result).
               apiRes = await aiClient.post('', {
                 model: fallbackModel,
                 messages,
-                temperature: 0.85,
+                temperature: 0.7,  // Lower temperature for stability
                 max_tokens: 150,
                 top_p: 0.9,
                 frequency_penalty: 0.3,
                 presence_penalty: 0.3
               });
               
-              reply = (apiRes.data.choices?.[0]?.message?.content || '').trim().toLowerCase();
-              attemptedModels.push(fallbackModel);
-              logger.info({ fallbackModel }, '✅ Fallback model succeeded');
-              break; // Success, exit loop
+              const rawReply = (apiRes.data.choices?.[0]?.message?.content || '').trim().toLowerCase();
+              
+              // Validate fallback response too
+              if (isValidResponse(rawReply)) {
+                reply = rawReply;
+                attemptedModels.push(fallbackModel);
+                logger.info({ fallbackModel }, '✅ Fallback model succeeded');
+                break; // Success, exit loop
+              } else {
+                attemptedModels.push(fallbackModel);
+                logger.warn({ fallbackModel, rawReply: rawReply.substring(0, 100) }, '❌ Fallback returned gibberish');
+                throw new Error('Gibberish response from fallback');
+              }
             } catch (fallbackError) {
               attemptedModels.push(fallbackModel);
               logger.warn({ fallbackModel, error: fallbackError.message }, '❌ Fallback model also failed');
