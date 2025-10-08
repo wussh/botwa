@@ -86,12 +86,12 @@ function alreadyProcessed(id) {
 const aiClient = axios.create({
   baseURL: CONFIG.AI_API_URL,
   headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ollama' },
-  timeout: 15000
+  timeout: 50000 // 50s to accommodate slower models
 });
 const embedClient = axios.create({
   baseURL: CONFIG.AI_EMBEDDING_URL,
   headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ollama' },
-  timeout: 15000
+  timeout: 20000 // 20s for embeddings
 });
 
 console.log("🔍 Setting up utility functions...");
@@ -1648,8 +1648,10 @@ Cognitive context: ${reasoningChain.slice(-2).map(r => r.step + ':' + r.result).
         } catch (primaryError) {
           logger.warn({ model: selectedModel, error: primaryError.message }, '⚠️ Primary model failed, trying fallback');
           
-          // Fallback to most reliable models in order
-          const fallbackModels = ['phi4-mini-reasoning:3.8b', 'phi3:3.8b', 'qwen2.5:7b', 'mistral:latest'];
+          // Only use fast models that respond within timeout
+          // Based on benchmarks: phi4 (2.6s), gemma3:1b (12.7s) are acceptable
+          // Removed: phi3 (16.5s), qwen2.5 (46s), mistral (39s), llama3.2 (27s)
+          const fallbackModels = ['phi4-mini-reasoning:3.8b', 'gemma3:1b-it-qat'];
           
           for (const fallbackModel of fallbackModels) {
             if (attemptedModels.includes(fallbackModel)) continue; // Skip if already tried

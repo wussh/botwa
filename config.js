@@ -24,11 +24,11 @@ module.exports = {
   
   // Model routing based on intent
   AI_MODELS: {
-    emotional: 'phi4-mini-reasoning:3.8b',        // empathetic, nuanced responses
-    factual: 'phi4-mini-reasoning:3.8b',          // accurate information
-    creative: 'phi4-mini-reasoning:3.8b',          // creative and flirty responses
-    summarization: 'phi4-mini-reasoning:3.8b',      // efficient summarization
-    coding: 'phi4-mini-reasoning:3.8b',      // technical responses
+    emotional: 'phi4-mini-reasoning:3.8b',        // empathetic, nuanced responses (2.6s)
+    factual: 'phi4-mini-reasoning:3.8b',          // accurate information (2.6s)
+    creative: 'phi4-mini-reasoning:3.8b',          // creative and flirty responses (2.6s)
+    summarization: 'phi4-mini-reasoning:3.8b',      // efficient summarization (2.6s)
+    coding: 'phi4-mini-reasoning:3.8b',      // Keep fast model for coding too (2.6s)
     embedding: 'tazarov/all-minilm-l6-v2-f32:latest'  // semantic embeddings
   },
   
