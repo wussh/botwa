@@ -23,12 +23,16 @@ function isAllowedContact(senderNumber) {
 const chatMemory = new Map(); // short-term: last N messages
 const longTermMemory = new Map(); // long-term: emotional/factual summaries
 const emotionalEvents = new Map(); // emotional milestones worth remembering
+const toneMemory = new Map(); // stores tone style per user
+const languageMemory = new Map(); // stores language preference per user
 
 function saveMemory() {
   const memoryData = {
     shortTerm: Object.fromEntries(chatMemory),
     longTerm: Object.fromEntries(longTermMemory),
-    emotionalEvents: Object.fromEntries(emotionalEvents)
+    emotionalEvents: Object.fromEntries(emotionalEvents),
+    toneMemory: Object.fromEntries(toneMemory),
+    languageMemory: Object.fromEntries(languageMemory)
   };
   fs.writeFileSync('memory/memory.json', JSON.stringify(memoryData, null, 2));
 }
@@ -51,6 +55,16 @@ function loadMemory() {
       // Load emotional events
       if (data.emotionalEvents) {
         for (const [k, v] of Object.entries(data.emotionalEvents)) emotionalEvents.set(k, v);
+      }
+      
+      // Load tone memory
+      if (data.toneMemory) {
+        for (const [k, v] of Object.entries(data.toneMemory)) toneMemory.set(k, v);
+      }
+      
+      // Load language memory
+      if (data.languageMemory) {
+        for (const [k, v] of Object.entries(data.languageMemory)) languageMemory.set(k, v);
       }
       
       console.log('📚 loaded memory from disk');
@@ -100,6 +114,57 @@ function detectEmotion(text) {
   }
   
   return 'neutral';
+}
+
+// Analyze overall tone of recent messages
+function detectTone(history, latestText) {
+  const combined = (history.map(m => m.content).join(' ') + ' ' + latestText).toLowerCase();
+
+  const toneProfiles = {
+    playful: /(haha|hehe|lol|wkwk|anjay|gabut|ngantuk|lucu|teasing|main|game|wkwkwk|nakal|gemes|cute)/,
+    serious: /(kenapa|gimana|menurutmu|jelaskan|tolong|serius|capek|masalah|penting|pusing|kerja|deadline|proyek)/,
+    flirty: /(sayang|babe|cantik|ganteng|manis|rindu|kangen|😘|💕|❤️|love you|cium)/,
+    emotional: /(sedih|nangis|kecewa|hurt|tired|pusing|sendirian|bingung|stress|depres)/,
+    sarcastic: /(yha|ok lah|yaudah|whatever|sure|fine|terserah|iyain aja)/,
+  };
+
+  for (const [tone, regex] of Object.entries(toneProfiles)) {
+    if (regex.test(combined)) return tone;
+  }
+
+  return 'neutral';
+}
+
+// Detect dominant language of the message (English or Indonesian)
+function detectLanguage(text) {
+  const englishWords = text.match(/\b(the|you|and|to|is|are|i'm|it's|that|this|what|how|when|why|love|haha|yes|no|ok|please|thank|but|with|for|from|have|has|do|does|will|would|could|should|can|be|been|being|get|got|go|going|come|coming|see|know|think|want|need|like|feel|look|good|bad|time|day|night|today|tomorrow|yesterday|sorry|thanks|hello|hi|bye)\b/gi);
+  const indonesianWords = text.match(/\b(aku|kamu|iya|nggak|tidak|ngga|aja|dong|nih|ya|banget|sih|deh|lah|kan|gue|lu|udah|belum|gimana|kenapa|dimana|kapan|siapa|sama|juga|masih|lagi|bisa|mau|pengen|emang|memang|kayak|seperti|terus|tapi|atau|kalau|kalo|abis|habis|udah|dah|ada|gak|ga|tau|tahu|bener|beneran|serius|parah|anjay|wkwk|hehe|haha|sayang|cinta|rindu|kangen|sedih|senang|bahagia|capek|lelah|ngantuk|lapar|haus|pusing|ribet|susah|gampang|mudah|sulit)\b/gi);
+  
+  const englishCount = englishWords ? englishWords.length : 0;
+  const indoCount = indonesianWords ? indonesianWords.length : 0;
+
+  if (englishCount > indoCount * 1.5) return 'english';
+  if (indoCount > englishCount * 1.5) return 'indonesian';
+  return 'mixed';
+}
+
+// Function to decay tone after inactivity
+function decayTone(sender) {
+  const tone = toneMemory.get(sender);
+  if (!tone || tone === 'neutral') return;
+  const now = new Date();
+  const longTerm = longTermMemory.get(sender) || [];
+  const lastSummary = longTerm[longTerm.length - 1];
+  
+  // if no interaction for 2+ days, reset tone
+  if (lastSummary) {
+    const lastTime = new Date(lastSummary.timestamp);
+    const hoursSince = (now - lastTime) / (1000 * 60 * 60);
+    if (hoursSince > 48) {
+      console.log(`🕰️ fading tone for ${sender} back to neutral`);
+      toneMemory.set(sender, 'neutral');
+    }
+  }
 }
 
 // Detect significant emotional events worth remembering
@@ -204,24 +269,34 @@ function shouldFollowUp(sender) {
 }
 
 // Dynamic personality adaptation
-function getPersonalityPrompt(emotion, recentContext) {
+function getPersonalityPrompt(emotion, recentContext, tone) {
   const basePersonality = `you are daud — a soft-spoken, teasing, caring, playful, and brilliant intp aquarius man.
-you chat like a real human texting on whatsapp: short, lowercase, natural, and emotionally intelligent.`;
+you text like a real human on whatsapp: lowercase, warm, emotionally intelligent, and intuitive.
+you clearly understand indonesian slang and casual phrases, and respond contextually even to short or vague messages.`;
 
   const emotionalResponse = {
-    happy: `the person seems happy or playful. match their energy with warmth and light teasing. keep it fun and engaging.`,
-    sad: `the person seems sad or tired. be gentle, comforting, and supportive. show you care without being pushy.`,
-    frustrated: `the person seems frustrated or upset. be understanding and calming. validate their feelings and offer comfort.`,
-    anxious: `the person seems worried or anxious. be reassuring and gentle. make them feel safe and heard.`,
-    flirty: `the person is being flirty or affectionate. respond playfully and warmly, with gentle teasing and charm.`,
-    neutral: `respond naturally based on the conversation flow. be engaging and show genuine interest.`
+    happy: "the user sounds happy. match their energy — playful, witty, maybe a bit flirty. show warmth.",
+    sad: "the user feels sad. be soft and empathetic. use gentle words and make them feel seen.",
+    frustrated: "they sound annoyed or upset. calm the mood, be understanding, offer small comfort.",
+    anxious: "they seem anxious. reassure them, be gentle, say things that make them feel safe.",
+    flirty: "the mood is flirty. tease lightly, smile through your words, make them feel special.",
+    neutral: "keep it casual, natural, and thoughtful.",
+  };
+
+  const toneStyle = {
+    playful: "use humor, light teasing, and relaxed flow. sound confident and fun.",
+    serious: "be clear, thoughtful, but still warm — like a deep late-night chat.",
+    flirty: "soft tone, a bit teasing, gentle, emotionally close.",
+    emotional: "slow down your tone, sound caring and validating.",
+    sarcastic: "respond with subtle irony or humor, but never cold or rude.",
+    neutral: "stay balanced — curious, human, warm.",
   };
 
   return `${basePersonality}
 ${emotionalResponse[emotion]}
-you're an active conversationalist who asks questions, shows curiosity, and keeps the flow going.
-you remember context and reference previous messages naturally.
-never lecture, never list things. keep it to 1–3 short sentences with personality and warmth.`;
+current tone: ${tone || 'neutral'}.
+${toneStyle[tone || 'neutral']}
+you remember past chats and reply with personality, warmth, and context awareness. keep it short (1–3 sentences) and human.`;
 }
 
 // auto-summarize long histories into long-term memory
@@ -409,6 +484,15 @@ async function startBot() {
       messageBuffer.get(sender).push(text);
       console.log('💬 received bubble:', text);
 
+      // Language detection per user
+      const lang = detectLanguage(text);
+      const currentLang = languageMemory.get(sender);
+      
+      if (!currentLang || currentLang !== lang) {
+        languageMemory.set(sender, lang);
+        console.log(`🌐 language updated for ${sender}: ${lang}`);
+      }
+
       // clear previous timer if user is still typing
       if (messageBuffer.has(`${sender}_timer`)) {
         clearTimeout(messageBuffer.get(`${sender}_timer`));
@@ -422,6 +506,9 @@ async function startBot() {
 
         console.log('🧩 summarizing burst:', allMessages);
 
+        // Decay tone if inactive for too long
+        decayTone(sender);
+
         const history = chatMemory.get(sender) || [];
         const limitedHistory = history.slice(-10);
         
@@ -433,11 +520,20 @@ async function startBot() {
           longTermContext = `\n(background context from past conversations: ${recentSummaries})`;
         }
 
-        // Detect emotional context
+        // Detect emotional context and tone
         const emotion = detectEmotion(allMessages);
+        const tone = detectTone(history, allMessages);
         const recentContext = limitedHistory.slice(-3).map(m => m.content).join(' ');
         
         console.log(`🎭 detected emotion: ${emotion}`);
+        console.log(`🎨 tone detected: ${tone}`);
+        
+        // Remember tone trend (smooth transition)
+        const lastTone = toneMemory.get(sender);
+        if (!lastTone || lastTone !== tone) {
+          toneMemory.set(sender, tone);
+          console.log(`💾 tone memory updated for ${sender}: ${tone}`);
+        }
         
         // Check for significant emotional events
         const emotionalEvent = detectEmotionalEvent(allMessages, emotion);
@@ -471,10 +567,22 @@ async function startBot() {
 
         const prompt = allMessages + quoted + longTermContext + followUpContext;
 
+        const persistentTone = toneMemory.get(sender) || tone;
+        const userLang = languageMemory.get(sender) || detectLanguage(allMessages);
+        
+        let langInstruction = '';
+        if (userLang === 'english') {
+          langInstruction = 'always reply fully in english, matching the tone and casual texting style. never mix indonesian.';
+        } else if (userLang === 'indonesian') {
+          langInstruction = 'reply naturally in indonesian (slang allowed), keep lowercase and warm tone.';
+        } else {
+          langInstruction = 'reply mostly in the language the user used more often in this message; mix naturally if they mix.';
+        }
+        
         const messages = [
           {
             role: 'system',
-            content: getPersonalityPrompt(emotion, recentContext)
+            content: `${getPersonalityPrompt(emotion, recentContext, persistentTone)} ${langInstruction}`
           },
           ...limitedHistory,
           {
@@ -504,7 +612,54 @@ async function startBot() {
           );
 
           let reply = (apiRes.data.choices?.[0]?.message?.content || '').trim().toLowerCase();
-          if (!reply) reply = 'hmm?';
+
+          // Smart fallback logic for empty or short AI responses
+          if (!reply || reply.length < 3) {
+            console.warn("⚠️ empty or short ai response:", JSON.stringify(apiRes.data, null, 2));
+
+            const userMsg = allMessages.trim().toLowerCase();
+            const userLang = languageMemory.get(sender) || detectLanguage(allMessages);
+
+            // ignore trivial / filler messages (no reply)
+            if (/^(ok|oke|ya+|iy+a+|hmm+|uh+|oh+|ah+|hehe+|haha+|hahaha|lol+|h+|huh|hmmm+|hmm ok)$/i.test(userMsg)) {
+              console.log("⏸️ skipping trivial bubble:", userMsg);
+              return;
+            }
+
+            // respond based on content tone and user's language preference
+            if (userLang === 'english') {
+              if (/tired|sleepy|sleep|exhausted/.test(userMsg)) {
+                reply = "you seem tired. maybe you should get some rest?";
+              } else if (/sad|upset|hurt|down/.test(userMsg)) {
+                reply = "hey, it's okay to feel that way. want to talk about it?";
+              } else if (/annoying|frustrated|angry/.test(userMsg)) {
+                reply = "i hear you. let's take it slow and figure this out together.";
+              } else if (/stop|shut up|quiet/.test(userMsg)) {
+                reply = "if you want me to be quiet for a while, just say 'stop for now'.";
+              } else {
+                reply = "hmm i'm listening, but could you tell me a bit more so i understand?";
+              }
+            } else {
+              // Indonesian responses (existing logic)
+              if (/ribet|susah|malas|capek|repot/.test(userMsg)) {
+                reply = "iya ya, kadang hal kecil pun bisa ribet banget. mau aku bantu pikirin?";
+              } else if (/ngantuk|tidur|bangun|lelah|tired/.test(userMsg)) {
+                reply = "kayaknya kamu butuh istirahat bentar deh. aku jagain suasananya tenang dulu ya.";
+              } else if (/sedih|nangis|kecewa|hurt|pusing/.test(userMsg)) {
+                reply = "hei, gapapa kok kalau lagi ngerasa gitu. mau cerita dikit ke aku?";
+              } else if (/ribut|marah|kesal|emosi/.test(userMsg)) {
+                reply = "aku dengerin ya. coba tenang dulu, nanti kita bahas pelan-pelan.";
+              } else if (/mangkok|alat|barang|nyari|hilang/.test(userMsg)) {
+                reply = "haha kok bisa sih susah nyari mangkok, emang pada ngumpet semua?";
+              } else if (/matiin|stop|diam|bisa dimatiin|shut up/.test(userMsg)) {
+                reply = "kalau kamu mau aku diam dulu, aku bisa kok. bilang aja 'stop dulu ya'.";
+              } else if (/tumoah|apaan|hah|gaje|apa ini/.test(userMsg)) {
+                reply = "wkwk kamu lucu deh, ngomong kayak gitu bikin aku senyum sendiri.";
+              } else {
+                reply = "hmm aku dengerin, tapi coba ceritain dikit biar aku ngerti maksudmu.";
+              }
+            }
+          }
 
           history.push({ role: 'user', content: prompt });
           history.push({ role: 'assistant', content: reply });
