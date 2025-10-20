@@ -22,7 +22,7 @@ services:
       - "9229:9229"  # Node.js debugger
     networks:
       - botwa-network
-    command: node --inspect=0.0.0.0:9229 bot.js
+    command: node --inspect=0.0.0.0:9229 src/index.js
     stdin_open: true
     tty: true
 

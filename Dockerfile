@@ -12,5 +12,6 @@ COPY . .
 VOLUME ["/app/auth", "/app/memory"]
 
 ENV TZ=Asia/Jakarta
+ENV NODE_ENV=production
 
-CMD ["node", "bot.js"]
+CMD ["node", "src/index.js"]

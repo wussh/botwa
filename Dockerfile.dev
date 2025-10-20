@@ -17,5 +17,5 @@ COPY . .
 # Expose ports
 EXPOSE 3000 9229
 
-# Use nodemon for development
-CMD ["nodemon", "--inspect=0.0.0.0:9229", "bot.js"]
+# Use nodemon for development with ESM support
+CMD ["nodemon", "--inspect=0.0.0.0:9229", "src/index.js"]
