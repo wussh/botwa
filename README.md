@@ -13,6 +13,7 @@ An intelligent, emotionally-aware WhatsApp bot powered by multiple AI models wit
 - **Gibberish Detection**: Validates AI responses and rejects nonsensical outputs
 
 ### 💾 Sophisticated Memory System
+- **Multiple Storage Options**: SQLite (recommended), MongoDB, or JSON file
 - **Short-term Memory**: Last 10 messages per user
 - **Long-term Memory**: Automatic summarization of conversation history
 - **Semantic Memory**: Vector embeddings for intelligent context recall
@@ -22,6 +23,7 @@ An intelligent, emotionally-aware WhatsApp bot powered by multiple AI models wit
 - **Personality Trends**: Tracks evolving personality traits over time
 - **Mood History**: Monitors mood drift and patterns
 - **Relationship Types**: Adapts persona (romantic/friend/counselor/mentor/companion)
+- **Database Migration**: Easy migration from JSON to SQLite/MongoDB
 
 ### 🎭 Dynamic Personality
 - **Adaptive Traits**: Curiosity, empathy, humor, flirtiness, logic, playfulness
@@ -50,6 +52,7 @@ An intelligent, emotionally-aware WhatsApp bot powered by multiple AI models wit
 - **Node.js**: v16 or higher
 - **WhatsApp**: Active WhatsApp account for bot
 - **AI Server**: Access to Ollama or compatible AI API endpoint
+- **Database** (Optional): SQLite (recommended) or MongoDB for better performance
 
 ## 🚀 Quick Start
 
@@ -62,6 +65,11 @@ cd botwa
 
 # Install dependencies
 npm install
+
+# Optional: Install database driver
+npm install sqlite3        # For SQLite (recommended)
+# OR
+npm install mongodb       # For MongoDB
 ```
 
 ### 2. Configuration
@@ -79,6 +87,18 @@ module.exports = {
   // AI API endpoints
   AI_API_URL: 'https://ai.wush.site/v1/chat/completions',
   AI_EMBEDDING_URL: 'https://ai.wush.site/v1/embeddings',
+  
+  // Database Configuration
+  DATABASE_TYPE: 'json',  // Options: 'sqlite', 'mongodb', 'json'
+  DATABASE_OPTIONS: {
+    sqlite: {
+      dbPath: 'memory/botwa.db'
+    },
+    mongodb: {
+      connectionString: 'mongodb://localhost:27017',
+      dbName: 'botwa'
+    }
+  },
   
   // AI Models (optimized for speed and quality)
   AI_MODELS: {
@@ -219,22 +239,25 @@ botwa/
 ├── Dockerfile               # Docker configuration
 ├── benchmark.sh             # Model performance testing
 │
+├── database/                # Database adapters (NEW!)
+│   ├── factory.js           # Database factory
+│   ├── sqlite.js            # SQLite adapter
+│   ├── mongodb.js           # MongoDB adapter
+│   ├── json.js              # JSON adapter (legacy)
+│   └── migrate.js           # Migration script
+│
 ├── auth/                    # WhatsApp session (auto-generated)
 │   ├── creds.json
 │   └── ...session files
 │
 ├── memory/                  # Bot memory persistence
-│   └── memory.json          # All memories stored here
+│   ├── memory.json          # JSON storage (default)
+│   └── botwa.db             # SQLite database (if enabled)
 │
 └── docs/                    # Documentation
+    ├── README.md            # Main documentation
+    ├── DATABASE_SETUP.md    # Database setup guide (NEW!)
     ├── COMPLETE_AUDIT.md    # Code & model audit
-    ├── DEPLOYMENT_CHECKLIST.md
-    ├── FIXES_APPLIED.md
-    ├── GIBBERISH_FIX.md
-    ├── LANGUAGE_FIX.md
-    ├── MODEL_FALLBACK_FIX.md
-    ├── OPTIMIZED_CONFIG.md
-    ├── TIMEOUT_FIX.md
     └── ...
 ```
 
@@ -249,12 +272,22 @@ STALE_CONNECTION_THRESHOLD: 600000  // 10 minutes before force relogin
 
 ### Memory Settings
 ```javascript
+DATABASE_TYPE: 'json'               // 'sqlite', 'mongodb', or 'json'
 MAX_SHORT_TERM_MESSAGES: 10         // Last N messages per user
 MAX_LONG_TERM_SUMMARIES: 5          // Compressed history entries
 MAX_EMOTIONAL_EVENTS: 20            // Significant emotional moments
 MAX_SEMANTIC_MEMORIES: 10           // Vector embeddings stored
 MEMORY_SAVE_DEBOUNCE: 5000          // Auto-save every 5s
 ```
+
+**💡 For better performance, migrate to SQLite:**
+```bash
+npm install sqlite3
+node database/migrate.js sqlite
+# Update config.js: DATABASE_TYPE: 'sqlite'
+```
+
+See [DATABASE_SETUP.md](DATABASE_SETUP.md) for detailed database configuration.
 
 ### AI Settings
 ```javascript
@@ -297,24 +330,76 @@ Testing: gemma3:1b-it-qat
 
 ### Build Image
 ```bash
-docker build -t botwa .
+# Using Docker Compose (recommended)
+docker-compose build
+
+# Using Makefile
+make build
 ```
 
-### Run Container
+### Run Container (SQLite)
 ```bash
-docker run -d \
-  --name botwa \
-  -v $(pwd)/auth:/app/auth \
-  -v $(pwd)/memory:/app/memory \
-  -e TZ=Asia/Jakarta \
-  --restart unless-stopped \
-  botwa
+# Start with Docker Compose
+docker-compose up -d
+
+# Using Makefile
+make up
+
+# View logs
+docker-compose logs -f botwa
+# or
+make logs
 ```
 
-### View Logs
+### Run with MongoDB
 ```bash
-docker logs -f botwa
+# Start with MongoDB
+docker-compose -f docker-compose.mongodb.yml up -d
+
+# Using Makefile
+make up-mongo
+
+# Access Mongo Express UI
+open http://localhost:8081
 ```
+
+### Common Commands
+```bash
+# Stop services
+docker-compose down
+# or
+make down
+
+# Restart bot
+docker-compose restart botwa
+# or
+make restart
+
+# View logs
+docker-compose logs -f
+# or
+make logs
+
+# Backup data
+./scripts/backup.sh
+# or
+make backup
+
+# Check status
+docker-compose ps
+# or
+make status
+```
+
+### Development Mode
+```bash
+# Start with hot reload
+docker-compose -f docker-compose.dev.yml up
+# or
+make up-dev
+```
+
+See [DOCKER_SETUP.md](DOCKER_SETUP.md) for detailed Docker instructions.
 
 ## 🔍 Monitoring & Debugging
 
@@ -332,7 +417,14 @@ node bot.js | grep "❌"               # Show errors only
 
 ### Check Memory File
 ```bash
-cat memory/memory.json | jq .        # Pretty print JSON
+# JSON (default)
+cat memory/memory.json | jq .
+
+# SQLite
+sqlite3 memory/botwa.db "SELECT * FROM chat_memory LIMIT 10;"
+
+# MongoDB
+mongo botwa --eval "db.chatMemory.find().limit(10)"
 ```
 
 ### Monitor Health
@@ -411,13 +503,8 @@ Contributions welcome! Please:
 3. Test thoroughly
 4. Submit a pull request
 
-## 📝 License
-
-ISC License - see LICENSE file
-
 ## 🔗 Links
 
-- **Documentation**: See `/docs` folder for detailed guides
 - **GitHub**: https://github.com/wussh/botwa
 - **Issues**: Report bugs on GitHub Issues
 
@@ -431,23 +518,3 @@ ISC License - see LICENSE file
 - **Baileys**: WhatsApp Web API library
 - **Ollama**: Local AI model serving
 - **Pino**: Fast JSON logging
-- All contributors and testers
-
-## 📈 Version History
-
-### v1.0.0 (Current)
-- ✅ Multi-model AI routing
-- ✅ Advanced memory system (9 types)
-- ✅ Personality adaptation
-- ✅ Bilingual support (EN/ID)
-- ✅ Model fallback system
-- ✅ Gibberish detection
-- ✅ Natural behavior simulation
-- ✅ Semantic memory with embeddings
-- ✅ Relationship persona detection
-- ✅ Self-reflection & learning
-- ✅ Production-ready reliability
-
----
-
-**Made with ❤️ by wussh**

@@ -1,0 +1,31 @@
+version: '3.8'
+
+services:
+  # Development bot with hot reload
+  botwa-dev:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    container_name: botwa-dev
+    restart: unless-stopped
+    environment:
+      - TZ=Asia/Jakarta
+      - NODE_ENV=development
+      - LOG_LEVEL=debug
+    volumes:
+      - ./:/app
+      - /app/node_modules
+      - ./auth:/app/auth
+      - ./memory:/app/memory
+    ports:
+      - "3000:3000"
+      - "9229:9229"  # Node.js debugger
+    networks:
+      - botwa-network
+    command: node --inspect=0.0.0.0:9229 bot.js
+    stdin_open: true
+    tty: true
+
+networks:
+  botwa-network:
+    driver: bridge

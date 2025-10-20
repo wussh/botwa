@@ -1,2 +1,9 @@
 node_modules
 auth
+memory/botwa.db
+memory/*.db
+memory/*.db-*
+.env
+*.log
+logs/
+backup/

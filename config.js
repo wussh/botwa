@@ -59,7 +59,25 @@ module.exports = {
   EMOTION_WEIGHT_FACTOR: 0.4,
   INTENT_WEIGHT_FACTOR: 0.6,
   
-  // File Paths
+  // Database Configuration
+  DATABASE_TYPE: 'json',  // Options: 'sqlite', 'mongodb', 'json'
+  DATABASE_OPTIONS: {
+    // SQLite options
+    sqlite: {
+      dbPath: 'memory/botwa.db'
+    },
+    // MongoDB options
+    mongodb: {
+      connectionString: 'mongodb://localhost:27017',
+      dbName: 'botwa'
+    },
+    // JSON options (legacy)
+    json: {
+      filePath: 'memory/memory.json'
+    }
+  },
+  
+  // File Paths (for legacy compatibility)
   MEMORY_FILE: 'memory/memory.json',
   AUTH_FOLDER: 'auth',
   
