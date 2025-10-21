@@ -3,7 +3,7 @@
  * Handles WhatsApp socket connection, authentication, and reconnection logic
  */
 
-import { makeWASocket, useMultiFileAuthState, DisconnectReason } from '@whiskeysockets/baileys';
+import { makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } from '@whiskeysockets/baileys';
 import qrcode from 'qrcode-terminal';
 import fs from 'fs';
 import { logger } from '../utils/logger.js';
@@ -33,8 +33,13 @@ export class WhatsAppConnection {
       // Load or create auth state
       const { state, saveCreds } = await useMultiFileAuthState(config.AUTH_FOLDER);
 
+      // Fetch latest WhatsApp Web version
+      const { version } = await fetchLatestBaileysVersion();
+      logger.info({ version }, '📱 Using WhatsApp Web version');
+
       // Create WhatsApp socket
       this.sock = makeWASocket({
+        version,
         auth: state,
         printQRInTerminal: false,
         logger: logger.child({ module: 'baileys' })
