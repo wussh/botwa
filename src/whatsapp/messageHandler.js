@@ -14,12 +14,20 @@ import { selectModel } from '../ai/modelSelector.js';
 import { generateResponse } from '../ai/aiService.js';
 import { memoryManager } from '../memory/memoryManager.js';
 
+// Pre-compiled pattern for trivial message detection
+const TRIVIAL_PATTERN = /^(ok|okay|oke|hmm|hm|ya|iya|yep|sure|fine|k)$/i;
+
+// Urgent emotion set for fast lookup
+const URGENT_EMOTIONS = new Set(['anxious', 'sad', 'frustrated']);
+
 export class MessageHandler {
   constructor(whatsappConnection) {
     this.connection = whatsappConnection;
     this.messageBuffer = new Map();
     this.replyQueue = new Map();
-    this.processedMsgIds = [];
+    // Use Set for O(1) lookup instead of array O(n) includes
+    this.processedMsgIds = new Set();
+    this.processedMsgIdsList = []; // Keep array for FIFO eviction
     this.trivialMessageCount = new Map();
   }
 
@@ -29,7 +37,7 @@ export class MessageHandler {
    * @returns {boolean} True if already processed
    */
   alreadyProcessed(id) {
-    return this.processedMsgIds.includes(id);
+    return this.processedMsgIds.has(id);
   }
 
   /**
@@ -37,9 +45,13 @@ export class MessageHandler {
    * @param {string} id - Message ID
    */
   markProcessed(id) {
-    this.processedMsgIds.push(id);
-    if (this.processedMsgIds.length > 500) {
-      this.processedMsgIds.shift(); // Simple LRU of 500
+    this.processedMsgIds.add(id);
+    this.processedMsgIdsList.push(id);
+    
+    // LRU eviction: keep only last 500
+    if (this.processedMsgIdsList.length > 500) {
+      const oldId = this.processedMsgIdsList.shift();
+      this.processedMsgIds.delete(oldId);
     }
   }
 
@@ -50,9 +62,7 @@ export class MessageHandler {
    * @returns {boolean} True if should skip
    */
   shouldSkipResponse(sender, text) {
-    const trivialPatterns = /^(ok|okay|oke|hmm|hm|ya|iya|yep|sure|fine|k)$/i;
-    
-    if (trivialPatterns.test(text.trim())) {
+    if (TRIVIAL_PATTERN.test(text.trim())) {
       const count = (this.trivialMessageCount.get(sender) || 0) + 1;
       this.trivialMessageCount.set(sender, count);
       
@@ -77,9 +87,8 @@ export class MessageHandler {
     const baseDelay = config.MIN_REPLY_DELAY;
     const lengthDelay = text.length * config.REPLY_DELAY_PER_CHAR;
     
-    // Emotional urgency reduces delay
-    const urgentEmotions = ['anxious', 'sad', 'frustrated'];
-    const emotionFactor = urgentEmotions.includes(emotion) ? 0.5 : 1;
+    // Emotional urgency reduces delay (O(1) Set lookup)
+    const emotionFactor = URGENT_EMOTIONS.has(emotion) ? 0.5 : 1;
     
     const totalDelay = Math.min(
       baseDelay + (lengthDelay * emotionFactor),
