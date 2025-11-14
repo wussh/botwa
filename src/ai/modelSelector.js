@@ -5,6 +5,10 @@
 
 import config from '../config/index.js';
 
+// Pre-computed emotion sets for fast lookup
+const NEGATIVE_EMOTIONS = new Set(['sad', 'anxious', 'frustrated']);
+const POSITIVE_EMOTIONS = new Set(['happy', 'excited']);
+
 /**
  * Select the best AI model based on intent, emotion, and context
  * @param {string} intent - Message intent
@@ -41,8 +45,8 @@ export function selectModel(intent, emotion, temporalContext = {}, moodDrift = {
       modelScores[config.AI_MODELS.emotional] += 0.5;
   }
   
-  // Emotion-based scoring modifiers
-  if (['sad', 'anxious', 'frustrated'].includes(emotion)) {
+  // Emotion-based scoring modifiers (using Set for O(1) lookup)
+  if (NEGATIVE_EMOTIONS.has(emotion)) {
     modelScores[config.AI_MODELS.emotional] += 0.4;
   }
   
@@ -51,7 +55,7 @@ export function selectModel(intent, emotion, temporalContext = {}, moodDrift = {
     modelScores[config.AI_MODELS.emotional] += 0.3;
   }
   
-  if (emotion === 'happy' || emotion === 'excited') {
+  if (POSITIVE_EMOTIONS.has(emotion)) {
     modelScores[config.AI_MODELS.creative] += 0.3;
   }
   
@@ -73,14 +77,18 @@ export function selectModel(intent, emotion, temporalContext = {}, moodDrift = {
     modelScores[config.AI_MODELS.creative] += 0.2;
   }
   
-  // Select highest scoring model
-  const selectedEntry = Object.entries(modelScores)
-    .sort((a, b) => b[1] - a[1])[0];
+  // Find highest scoring model without full sort (more efficient)
+  let selectedModel = null;
+  let maxScore = -Infinity;
   
-  const selectedModel = selectedEntry[0];
-  const confidence = selectedEntry[1];
+  for (const [model, score] of Object.entries(modelScores)) {
+    if (score > maxScore) {
+      maxScore = score;
+      selectedModel = model;
+    }
+  }
   
-  return { model: selectedModel, confidence };
+  return { model: selectedModel, confidence: maxScore };
 }
 
 /**
