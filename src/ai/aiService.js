@@ -28,6 +28,26 @@ export const embedClient = axios.create({
   timeout: 15000
 });
 
+// Embedding cache with LRU eviction (max 1000 entries)
+const embeddingCache = new Map();
+const MAX_CACHE_SIZE = 1000;
+
+/**
+ * Create cache key from text
+ * @param {string} text - Text to hash
+ * @returns {string} Cache key
+ */
+function getCacheKey(text) {
+  // Simple hash for cache key (faster than storing full text as key)
+  let hash = 0;
+  for (let i = 0; i < text.length; i++) {
+    const char = text.charCodeAt(i);
+    hash = ((hash << 5) - hash) + char;
+    hash = hash & hash; // Convert to 32-bit integer
+  }
+  return `${hash}_${text.length}`;
+}
+
 /**
  * Generate AI response with fallback support
  * @param {Array} messages - Conversation messages
@@ -76,12 +96,20 @@ export async function generateResponse(messages, model, maxTokens = config.AI_MA
 }
 
 /**
- * Get vector embedding for text
+ * Get vector embedding for text (with caching)
  * @param {string} text - Text to embed
  * @param {string} model - Embedding model to use
  * @returns {Promise<Array<number>>} Vector embedding
  */
 export async function getEmbedding(text, model = config.AI_MODELS.embedding) {
+  const cacheKey = getCacheKey(text);
+  
+  // Check cache first
+  if (embeddingCache.has(cacheKey)) {
+    logger.debug('🎯 Embedding cache hit');
+    return embeddingCache.get(cacheKey);
+  }
+  
   try {
     const response = await embedClient.post('', {
       model,
@@ -93,6 +121,14 @@ export async function getEmbedding(text, model = config.AI_MODELS.embedding) {
     if (!embedding || !Array.isArray(embedding)) {
       throw new Error('Invalid embedding response');
     }
+    
+    // Store in cache with LRU eviction
+    if (embeddingCache.size >= MAX_CACHE_SIZE) {
+      // Remove oldest entry (first key in Map)
+      const firstKey = embeddingCache.keys().next().value;
+      embeddingCache.delete(firstKey);
+    }
+    embeddingCache.set(cacheKey, embedding);
     
     return embedding;
     
