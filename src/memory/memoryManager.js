@@ -4,7 +4,8 @@
  * emotional events, semantic memory, and user preferences
  */
 
-import fs from 'fs';
+import fs from 'fs/promises';
+import { existsSync } from 'fs';
 import { logger } from '../utils/logger.js';
 import config from '../config/index.js';
 import { truncateArray, calculateDecayFactor, cosineSimilarity, findSimilarMemories } from '../utils/memoryUtils.js';
@@ -368,8 +369,9 @@ export class MemoryManager {
     
     const now = Date.now();
     
-    // Check for events 1-3 days ago
-    for (const event of events.reverse()) {
+    // Check for events 1-3 days ago (iterate backwards without copying)
+    for (let i = events.length - 1; i >= 0; i--) {
+      const event = events[i];
       const eventTime = new Date(event.timestamp).getTime();
       const daysSince = (now - eventTime) / (1000 * 60 * 60 * 24);
       
@@ -386,14 +388,20 @@ export class MemoryManager {
    */
   scheduleSave() {
     clearTimeout(this.saveTimer);
-    this.saveTimer = setTimeout(() => this.saveMemory(), config.MEMORY_SAVE_DEBOUNCE);
+    this.saveTimer = setTimeout(() => {
+      // Fire and forget - don't wait for save to complete
+      this.saveMemory().catch(error => {
+        logger.error(`❌ Background save failed: ${error.message}`);
+      });
+    }, config.MEMORY_SAVE_DEBOUNCE);
   }
 
   /**
-   * Save all memory to disk
+   * Save all memory to disk (async)
    */
-  saveMemory() {
+  async saveMemory() {
     try {
+      // Batch convert all Maps to objects in a single operation
       const memoryData = {
         shortTerm: Object.fromEntries(this.chatMemory),
         longTerm: Object.fromEntries(this.longTermMemory),
@@ -410,7 +418,8 @@ export class MemoryManager {
         lastSaved: new Date().toISOString()
       };
       
-      fs.writeFileSync(config.MEMORY_FILE, JSON.stringify(memoryData, null, 2));
+      // Use async file write to avoid blocking event loop
+      await fs.writeFile(config.MEMORY_FILE, JSON.stringify(memoryData, null, 2));
       logger.debug('💾 Memory saved to disk');
     } catch (error) {
       logger.error(`❌ Failed to save memory: ${error.message}`);
@@ -418,18 +427,20 @@ export class MemoryManager {
   }
 
   /**
-   * Load memory from disk
+   * Load memory from disk (async)
    */
-  loadMemory() {
-    if (!fs.existsSync(config.MEMORY_FILE)) {
+  async loadMemory() {
+    if (!existsSync(config.MEMORY_FILE)) {
       logger.info('📚 No existing memory file found, starting fresh');
       return;
     }
     
     try {
-      const data = JSON.parse(fs.readFileSync(config.MEMORY_FILE, 'utf8'));
+      // Use async file read to avoid blocking event loop
+      const fileContent = await fs.readFile(config.MEMORY_FILE, 'utf8');
+      const data = JSON.parse(fileContent);
       
-      // Load all memory types
+      // Load all memory types using a more efficient batch approach
       const memoryMaps = [
         ['shortTerm', this.chatMemory],
         ['longTerm', this.longTermMemory],
@@ -460,7 +471,7 @@ export class MemoryManager {
       // Backup corrupted file
       const backupPath = `${config.MEMORY_FILE}.corrupted.${Date.now()}`;
       try {
-        fs.renameSync(config.MEMORY_FILE, backupPath);
+        await fs.rename(config.MEMORY_FILE, backupPath);
         logger.warn(`⚠️ Corrupted memory file backed up to ${backupPath}`);
       } catch (backupError) {
         logger.error(`❌ Failed to backup corrupted file: ${backupError.message}`);
@@ -491,18 +502,32 @@ export class MemoryManager {
   }
 
   /**
-   * Get memory statistics
+   * Get memory statistics (optimized)
    * @returns {object} Memory statistics
    */
   getStats() {
+    let totalMessages = 0;
+    let emotionalEventsCount = 0;
+    let semanticMemoriesCount = 0;
+    
+    // Single pass through each collection
+    for (const messages of this.chatMemory.values()) {
+      totalMessages += messages.length;
+    }
+    
+    for (const events of this.emotionalEvents.values()) {
+      emotionalEventsCount += events.length;
+    }
+    
+    for (const memories of this.semanticMemory.values()) {
+      semanticMemoriesCount += memories.length;
+    }
+    
     return {
       users: this.chatMemory.size,
-      totalMessages: Array.from(this.chatMemory.values())
-        .reduce((sum, messages) => sum + messages.length, 0),
-      emotionalEvents: Array.from(this.emotionalEvents.values())
-        .reduce((sum, events) => sum + events.length, 0),
-      semanticMemories: Array.from(this.semanticMemory.values())
-        .reduce((sum, memories) => sum + memories.length, 0)
+      totalMessages,
+      emotionalEvents: emotionalEventsCount,
+      semanticMemories: semanticMemoriesCount
     };
   }
 }
