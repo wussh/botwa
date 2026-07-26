@@ -52,7 +52,7 @@ services:
 
   # MongoDB Express - Web UI for database management
   mongo-express:
-    image: mongo-express:1.0.0
+    image: mongo-express:1.0.2
     container_name: botwa-mongo-express
     restart: unless-stopped
     environment:
