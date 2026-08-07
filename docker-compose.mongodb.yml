@@ -28,7 +28,7 @@ services:
 
   # MongoDB database
   mongodb:
-    image: mongo:6.0
+    image: mongo:8.3
     container_name: botwa-mongodb
     restart: unless-stopped
     environment:
