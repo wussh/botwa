@@ -23,6 +23,6 @@
   },
   "optionalDependencies": {
     "sqlite3": "^5.1.7",
-    "mongodb": "^6.3.0"
+    "mongodb": "^7.0.0"
   }
 }
